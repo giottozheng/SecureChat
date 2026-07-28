@@ -148,7 +148,7 @@ data class FriendEntity(
     val displayName: String,
     val publicKey: String,
     val isOnline: Boolean = false,
-    val avatarUrl: String? = null,
+    @ColumnInfo(name = "avatar_url") val avatarUrl: String? = null,
     val updatedAt: Long = System.currentTimeMillis()
 )
 
@@ -210,10 +210,32 @@ abstract class MessageDatabase : RoomDatabase() {
 
 /**
  * 数据库迁移 4 → 5：好友表新增 avatar_url 列（头像相对路径，可空）。
- * 对应 FriendEntity.avatarUrl 字段（Room 默认列名 avatar_url）。
+ * 对应 FriendEntity.avatarUrl 字段（已用 @ColumnInfo(name="avatar_url") 显式指定蛇形列名，
+ * 否则 Room 默认按字段名生成驼峰列名 avatarUrl，与下方迁移创建的 avatar_url 不一致，
+ * 会在迁移校验时抛 IllegalStateException 致 App 启动/打开联系人即闪退——即 1.0.65 的回归 bug）。
+ *
+ * 防御式：先查 PRAGMA table_info 判断 avatar_url 是否已存在。
+ * 原因：迁移校验失败会抛异常，但 ALTER 可能已在磁盘上提交（version 未升）。
+ * 若直接再次 ALTER 会报 "duplicate column: avatar_url" 二次崩溃。
+ * 已存在则跳过，仅让 Room 完成校验即可。
  */
 val MIGRATION_4_5 = object : Migration(4, 5) {
     override fun migrate(db: SupportSQLiteDatabase) {
-        db.execSQL("ALTER TABLE friends ADD COLUMN avatar_url TEXT")
+        val cursor = db.query("PRAGMA table_info(friends)")
+        var exists = false
+        try {
+            val nameIdx = cursor.getColumnIndexOrThrow("name")
+            while (cursor.moveToNext()) {
+                if (cursor.getString(nameIdx) == "avatar_url") {
+                    exists = true
+                    break
+                }
+            }
+        } finally {
+            cursor.close()
+        }
+        if (!exists) {
+            db.execSQL("ALTER TABLE friends ADD COLUMN avatar_url TEXT")
+        }
     }
 }

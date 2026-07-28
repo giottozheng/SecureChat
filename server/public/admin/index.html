@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SecureChat 管理后台</title>
+<style>
+  :root {
+    --bg: #f4f6fb; --card: #ffffff; --ink: #1f2533; --muted: #6b7280;
+    --line: #e5e8ef; --brand: #2f6df6; --brand-d: #1f53c7; --ok: #1aa86b;
+    --warn: #d98a00; --danger: #e23b3b; --chip: #eef3ff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--ink); font-size: 14px; }
+  button { font-family: inherit; cursor: pointer; }
+  a { color: var(--brand); }
+  .hidden { display: none !important; }
+
+  /* 登录 */
+  #login { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+  .login-card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 28px; width: 100%; max-width: 360px; box-shadow: 0 8px 30px rgba(20,30,60,.08); }
+  .login-card h1 { font-size: 19px; margin: 0 0 4px; }
+  .login-card .sub { color: var(--muted); margin: 0 0 20px; font-size: 13px; }
+
+  /* 布局 */
+  .topbar { background: var(--card); border-bottom: 1px solid var(--line); padding: 10px 18px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 5; }
+  .topbar .brand { font-weight: 700; font-size: 16px; }
+  .topbar .brand span { color: var(--brand); }
+  .nav { display: flex; gap: 6px; padding: 10px 18px; flex-wrap: wrap; background: var(--card); border-bottom: 1px solid var(--line); }
+  .nav button { background: transparent; border: 1px solid var(--line); color: var(--ink); padding: 7px 14px; border-radius: 8px; font-size: 13px; }
+  .nav button.active { background: var(--brand); border-color: var(--brand); color: #fff; }
+  .wrap { padding: 18px; max-width: 1100px; margin: 0 auto; }
+
+  /* 表单 / 卡片 */
+  label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 6px; }
+  input, select { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; font-size: 14px; background: #fff; color: var(--ink); }
+  input:focus, select:focus { outline: none; border-color: var(--brand); }
+  .btn { background: var(--brand); color: #fff; border: none; padding: 10px 16px; border-radius: 9px; font-size: 14px; font-weight: 600; }
+  .btn:hover { background: var(--brand-d); }
+  .btn.ghost { background: #fff; color: var(--ink); border: 1px solid var(--line); }
+  .btn.danger { background: var(--danger); }
+  .btn.warn { background: var(--warn); }
+  .btn.sm { padding: 6px 10px; font-size: 12px; border-radius: 7px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
+  .row > div { flex: 1; min-width: 160px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px; margin-bottom: 16px; }
+  .card h2 { font-size: 15px; margin: 0 0 14px; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 6px; line-height: 1.5; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+  .stat { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .stat .k { color: var(--muted); font-size: 12px; }
+  .stat .v { font-size: 24px; font-weight: 700; margin-top: 4px; }
+
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--line); font-size: 13px; vertical-align: middle; }
+  th { color: var(--muted); font-weight: 600; }
+  .chip { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; background: var(--chip); color: var(--brand-d); }
+  .chip.ok { background: #e7f7ef; color: var(--ok); }
+  .chip.off { background: #fdeaea; color: var(--danger); }
+  .table-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
+  .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: #1f2533; color: #fff; padding: 10px 16px; border-radius: 10px; font-size: 13px; opacity: 0; transition: opacity .2s; z-index: 50; max-width: 90vw; }
+  .toast.show { opacity: 1; }
+  .toast.err { background: var(--danger); }
+  .toast.ok { background: var(--ok); }
+
+  .pill { display:inline-flex; align-items:center; gap:6px; }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--ok); display:inline-block; }
+  .dot.off { background:#c4c9d4; }
+
+  .modal-bg { position: fixed; inset: 0; background: rgba(20,28,48,.45); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 40; }
+  .modal { background: #fff; border-radius: 14px; padding: 22px; width: 100%; max-width: 380px; }
+  .modal h3 { margin: 0 0 14px; font-size: 16px; }
+</style>
+</head>
+<body>
+
+<!-- 登录 -->
+<div id="login">
+  <div class="login-card">
+    <h1>SecureChat <span>管理后台</span></h1>
+    <p class="sub">请输入管理员账号登录</p>
+    <form id="loginForm">
+      <label>账号</label>
+      <input id="lu" type="text" autocomplete="username" placeholder="admin" value="admin" />
+      <label>密码</label>
+      <input id="lp" type="password" autocomplete="current-password" placeholder="密码" />
+      <button class="btn" style="width:100%;margin-top:18px" type="submit">登录</button>
+    </form>
+  </div>
+</div>
+
+<!-- 强制改密 -->
+<div id="reset" class="hidden">
+  <div class="login-card">
+    <h1>首次登录 · 请修改密码</h1>
+    <p class="sub">出于安全，首次登录必须设置新密码（至少 6 位）。</p>
+    <form id="resetForm">
+      <label>原密码</label>
+      <input id="ro" type="password" autocomplete="off" />
+      <label>新密码</label>
+      <input id="rn" type="password" autocomplete="new-password" />
+      <label>确认新密码</label>
+      <input id="rc" type="password" autocomplete="new-password" />
+      <button class="btn" style="width:100%;margin-top:18px" type="submit">确认修改</button>
+    </form>
+  </div>
+</div>
+
+<!-- 主界面 -->
+<div id="app" class="hidden">
+  <div class="topbar">
+    <div class="brand">SecureChat <span>管理后台</span></div>
+    <button class="btn ghost sm" id="logoutBtn">退出登录</button>
+  </div>
+  <div class="nav" id="nav">
+    <button data-tab="overview" class="active">概览</button>
+    <button data-tab="domain">服务端设置</button>
+    <button data-tab="retention">消息保留</button>
+    <button data-tab="users">用户管理</button>
+    <button data-tab="messages">消息记录</button>
+    <button data-tab="announcement">系统公告</button>
+    <button data-tab="audit">操作审计</button>
+  </div>
+  <div class="wrap">
+
+    <!-- 概览 -->
+    <section data-section="overview">
+      <div class="grid" id="statGrid"></div>
+      <div class="card">
+        <h2>访问地址</h2>
+        <div id="accessInfo" class="hint"></div>
+      </div>
+      <div class="card">
+        <h2>OTA 升级信息</h2>
+        <div id="otaInfo" class="hint">加载中…</div>
+      </div>
+    </section>
+
+    <!-- 服务端设置（域名 + 端口）-->
+    <section data-section="domain" class="hidden">
+      <div class="card">
+        <h2>服务端设置</h2>
+        <label>对外域名（客户端/后台对外访问地址，例如 chat.yourdomain.com）</label>
+        <input id="domainInput" placeholder="例如 chat.example.com（不含 http://）" />
+        <label>服务监听端口（修改后服务端会自动重启以应用新端口，建议保持 8080）</label>
+        <input id="portInput" type="number" min="1" max="65535" />
+        <div class="row" style="margin-top:14px">
+          <button class="btn" id="saveDomain">保存</button>
+        </div>
+        <p class="hint">说明：<br>
+        • 对外域名由你自己的反向代理 / DDNS 解析到本服务，仅用于展示访问地址与客户端「自动获取」配置，不影响鉴权与转发。<br>
+        • 监听端口修改后，服务端会以新端口重启（若新端口不可用会自动回退 8080，不会锁死）。若端口改变，请在重启后访问新地址 <b>http://&lt;域名或IP&gt;:&lt;新端口&gt;/admin</b>。</p>
+      </div>
+    </section>
+
+    <!-- 消息保留 -->
+    <section data-section="retention" class="hidden">
+      <div class="card">
+        <h2>消息留存天数</h2>
+        <label>服务端消息（仅密文）保留天数，到期自动清理（1–365）</label>
+        <input id="retentionInput" type="number" min="1" max="365" />
+        <div class="row" style="margin-top:14px">
+          <button class="btn" id="saveRetention">保存</button>
+          <button class="btn warn" id="purgeNow">立即清理过期消息</button>
+        </div>
+        <p class="hint">消息已落盘持久化（重启不丢）。保留天数修改后立即生效，下一次定时清理（每小时）与「立即清理」都会按新天数执行。清理只删除超过保留天数的密文，不影响未到期消息。</p>
+      </div>
+    </section>
+
+    <!-- 用户管理 -->
+    <section data-section="users" class="hidden">
+      <div class="card">
+        <h2>新增用户</h2>
+        <div class="row">
+          <div><label>用户名</label><input id="nu" placeholder="登录用户名" /></div>
+          <div><label>初始密码</label><input id="np" placeholder="至少 6 位" /></div>
+          <div><label>昵称</label><input id="nd" placeholder="显示昵称" /></div>
+          <div style="flex:0"><button class="btn" id="addUser" style="margin-bottom:0">添加</button></div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>用户列表</h2>
+        <div style="overflow-x:auto">
+          <table id="userTable">
+            <thead><tr><th>用户名</th><th>昵称</th><th>状态</th><th>在线</th><th>好友</th><th>密钥</th><th>注册时间</th><th>操作</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 消息记录 -->
+    <section data-section="messages" class="hidden">
+      <div class="card">
+        <h2>消息记录（服务端仅存密文，不解密明文）</h2>
+        <div class="row">
+          <div><label>搜索（用户ID / 会话ID，留空查全部）</label><input id="msgQ" placeholder="user-1 / conversationId" /></div>
+          <div style="flex:0"><button class="btn" id="msgSearch" style="margin-bottom:0">查询</button></div>
+          <div style="flex:0"><button class="btn ghost" id="msgRefresh" style="margin-bottom:0">刷新</button></div>
+        </div>
+        <p class="hint" id="msgMeta"></p>
+        <div style="overflow-x:auto">
+          <table id="msgTable">
+            <thead><tr><th>时间</th><th>发送者</th><th>接收者</th><th>会话</th><th>类型</th><th>密文预览</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <button class="btn ghost sm" id="msgPrev">上一页</button>
+          <button class="btn ghost sm" id="msgNext">下一页</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 系统公告 -->
+    <section data-section="announcement" class="hidden">
+      <div class="card">
+        <h2>发布系统公告</h2>
+        <label>公告标题</label>
+        <input id="annTitle" placeholder="例如 系统维护通知" />
+        <label>公告内容（支持换行）</label>
+        <textarea id="annContent" rows="4" style="width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:9px;font-size:14px;font-family:inherit;resize:vertical"></textarea>
+        <div class="row" style="margin-top:14px">
+          <button class="btn" id="annPost">发布（推送给所有客户端）</button>
+        </div>
+        <p class="hint">发布公告后，客户端下次启动时若检测到是新公告，会弹窗展示。历史公告仅保留最近 50 条。</p>
+      </div>
+      <div class="card">
+        <h2>历史公告</h2>
+        <div style="overflow-x:auto">
+          <table id="annTable">
+            <thead><tr><th>时间</th><th>标题</th><th>内容预览</th><th>操作</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 操作审计 -->
+    <section data-section="audit" class="hidden">
+      <div class="card">
+        <h2>操作审计日志</h2>
+        <div class="row">
+          <div><label>操作类型筛选（留空查全部）</label><input id="auditFilter" placeholder="如 config_update / user_create" /></div>
+          <div style="flex:0"><button class="btn" id="auditSearch" style="margin-bottom:0">查询</button></div>
+          <div style="flex:0"><button class="btn ghost" id="auditRefresh" style="margin-bottom:0">刷新</button></div>
+        </div>
+        <p class="hint" id="auditMeta"></p>
+        <div style="overflow-x:auto">
+          <table id="auditTable">
+            <thead><tr><th>时间</th><th>操作</th><th>详情</th><th>操作人</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<!-- 改密弹窗 -->
+<div id="pwModal" class="modal-bg hidden">
+  <div class="modal">
+    <h3>修改管理员密码</h3>
+    <label>原密码</label><input id="mOld" type="password" />
+    <label>新密码</label><input id="mNew" type="password" />
+    <label>确认新密码</label><input id="mNew2" type="password" />
+    <div class="row" style="margin-top:14px">
+      <button class="btn" id="mSave">保存</button>
+      <button class="btn ghost" id="mCancel">取消</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const origin = location.origin;
+
+function toast(msg, type) {
+  const t = $('#toast'); t.textContent = msg; t.className = 'toast show ' + (type || '');
+  setTimeout(() => t.className = 'toast', 2200);
+}
+async function api(path, opts = {}) {
+  opts.credentials = 'same-origin';
+  if (opts.body && typeof opts.body !== 'string') { opts.body = JSON.stringify(opts.body); opts.headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {}); }
+  const r = await fetch(origin + path, opts);
+  if (r.status === 401) { logout(); throw new Error('未授权'); }
+  let data; try { data = await r.json(); } catch { data = {}; }
+  if (!r.ok) throw new Error(data.error || ('错误 ' + r.status));
+  return data;
+}
+
+function fmtTime(ts) {
+  if (!ts) return '-';
+  const d = new Date(ts); return d.toLocaleString('zh-CN', { hour12: false });
+}
+function fmtDuration(s) {
+  s = Math.floor(s);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return `${h} 小时 ${m} 分`;
+}
+
+let state = { mustReset: false, domain: '', retention: 1, msgPage: 0, msgQ: '' };
+
+/* ---------- 登录 ---------- */
+$('#loginForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const username = $('#lu').value.trim(); const password = $('#lp').value;
+  try {
+    const d = await api('/admin/api/login', { method: 'POST', body: { username, password } });
+    state.mustReset = d.mustReset;
+    if (d.mustReset) { $('#ro').value = password; showReset(); }
+    else enterApp();
+  } catch (err) { toast(err.message, 'err'); }
+});
+
+function showReset() { $('#login').classList.add('hidden'); $('#reset').classList.remove('hidden'); $('#rn').focus(); }
+$('#resetForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const oldPassword = $('#ro').value; const np = $('#rn').value; const nc = $('#rc').value;
+  if (np.length < 6) return toast('新密码至少 6 位', 'err');
+  if (np !== nc) return toast('两次输入不一致', 'err');
+  try {
+    await api('/admin/api/reset-password', { method: 'POST', body: { oldPassword, newPassword: np } });
+    toast('密码已修改', 'ok'); $('#reset').classList.add('hidden'); enterApp();
+  } catch (err) { toast(err.message, 'err'); }
+});
+
+function logout() {
+  fetch(origin + '/admin/api/logout', { method: 'POST', credentials: 'same-origin' }).catch(()=>{});
+  $('#app').classList.add('hidden'); $('#login').classList.remove('hidden'); $('#reset').classList.add('hidden');
+}
+$('#logoutBtn').addEventListener('click', logout);
+
+function enterApp() {
+  $('#login').classList.add('hidden'); $('#reset').classList.add('hidden'); $('#app').classList.remove('hidden');
+  loadAll();
+}
+
+/* ---------- 导航 ---------- */
+$('#nav').addEventListener('click', (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  document.querySelectorAll('#nav button').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  const tab = b.dataset.tab;
+  document.querySelectorAll('[data-section]').forEach(s => s.classList.toggle('hidden', s.dataset.section !== tab));
+  if (tab === 'overview') loadStats();
+  if (tab === 'domain') loadConfig();
+  if (tab === 'retention') loadConfig();
+  if (tab === 'users') loadUsers();
+  if (tab === 'messages') loadMessages();
+  if (tab === 'announcement') loadAnnouncements();
+  if (tab === 'audit') loadAudit();
+});
+
+async function loadAll() { await loadStats(); await loadConfig(); }
+
+/* ---------- 概览 ---------- */
+async function loadStats() {
+  try {
+    const s = await api('/admin/api/stats');
+    const grid = $('#statGrid');
+    grid.innerHTML = [
+      ['运行状态', '运行中'], ['在线客户端', s.onlineClients], ['注册用户', s.userCount],
+      ['消息总数', s.messageCount], ['保留天数', s.retentionDays + ' 天'],
+      ['内存占用', s.memoryMB + ' MB'], ['运行时长', fmtDuration(s.uptime)], ['服务版本', s.version]
+    ].map(([k, v]) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
+
+    const acc = [];
+    acc.push(`当前访问地址：<b>${origin}/admin</b>`);
+    if (s.serverDomain) acc.push(`对外域名地址：<b>https://${s.serverDomain}/admin</b>`);
+    acc.push(`服务监听：<b>${s.host}:${s.port}</b>（内网）。如需外网访问，请用反向代理或 DDNS 将域名解析到该端口。`);
+    $('#accessInfo').innerHTML = acc.join('<br>');
+
+    const o = await api('/admin/api/ota');
+    if (o.exists) {
+      $('#otaInfo').innerHTML = `最新版本：<b>${o.versionName}</b>（versionCode ${o.versionCode}）<br>APK 大小：${(o.size/1024/1024).toFixed(1)} MB<br>更新说明：${o.changelog || '-'}`;
+    } else $('#otaInfo').innerHTML = '暂无 OTA 更新信息。';
+  } catch (err) { /* 401 已处理 */ }
+}
+
+/* ---------- 配置（域名 / 保留）---------- */
+async function loadConfig() {
+  try {
+    const c = await api('/admin/api/config');
+    state.domain = c.serverDomain; state.retention = c.retentionDays;
+    $('#domainInput').value = c.serverDomain || '';
+    $('#retentionInput').value = c.retentionDays;
+    $('#portInput').value = (c.serverPort || 8080);
+  } catch (err) { toast(err.message, 'err'); }
+}
+$('#saveDomain').addEventListener('click', async () => {
+  try {
+    const port = parseInt($('#portInput').value, 10);
+    if (isNaN(port) || port < 1 || port > 65535) return toast('端口范围 1–65535', 'err');
+    const d = await api('/admin/api/config', { method: 'POST', body: { serverDomain: $('#domainInput').value, serverPort: port } });
+    state.domain = d.serverDomain;
+    if (d.restarted) {
+      toast('端口已变更，服务端重启中…请稍后访问新地址', 'ok');
+      // 等待重启后自动刷新页面（新端口若不同需手动访问）
+      setTimeout(() => { try { location.reload(); } catch (_) {} }, 4000);
+      return;
+    }
+    toast('服务端设置已保存', 'ok'); loadStats();
+  } catch (err) { toast(err.message, 'err'); }
+});
+$('#saveRetention').addEventListener('click', async () => {
+  try {
+    const d = await api('/admin/api/config', { method: 'POST', body: { retentionDays: $('#retentionInput').value } });
+    state.retention = d.retentionDays; toast('保留天数已保存', 'ok'); loadStats();
+  } catch (err) { toast(err.message, 'err'); }
+});
+$('#purgeNow').addEventListener('click', async () => {
+  try {
+    const d = await api('/admin/api/messages/purge', { method: 'POST' });
+    toast(`已清理 ${d.removed} 条，剩余 ${d.remaining} 条`, 'ok'); loadStats();
+  } catch (err) { toast(err.message, 'err'); }
+});
+
+/* ---------- 用户管理 ---------- */
+async function loadUsers() {
+  try {
+    const d = await api('/admin/api/users');
+    const tb = $('#userTable tbody');
+    if (!d.users.length) { tb.innerHTML = '<tr><td colspan="8" style="color:var(--muted)">暂无用户</td></tr>'; return; }
+    tb.innerHTML = d.users.map(u => `
+      <tr>
+        <td>${u.username}</td>
+        <td>${u.displayName}</td>
+        <td><span class="chip ${u.enabled ? 'ok' : 'off'}">${u.enabled ? '启用' : '禁用'}</span></td>
+        <td><span class="pill"><span class="dot ${u.online ? '' : 'off'}"></span>${u.online ? '在线' : '离线'}</span></td>
+        <td>${u.friendCount}</td>
+        <td>${u.hasKey ? '已上传' : '—'}</td>
+        <td>${fmtTime(u.createdAt)}</td>
+        <td>
+          <div class="table-actions">
+            ${u.enabled ? `<button class="btn ghost sm" data-act="disable" data-id="${u.id}">禁用</button>`
+                        : `<button class="btn sm" data-act="enable" data-id="${u.id}">启用</button>`}
+            <button class="btn ghost sm" data-act="reset" data-id="${u.id}">重置密码</button>
+            <button class="btn danger sm" data-act="delete" data-id="${u.id}">删除</button>
+          </div>
+        </td>
+      </tr>`).join('');
+  } catch (err) { toast(err.message, 'err'); }
+}
+$('#userTable').addEventListener('click', async (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  const id = b.dataset.id, act = b.dataset.act;
+  try {
+    if (act === 'disable') { await api(`/admin/api/users/${id}/disable`, { method: 'POST' }); toast('已禁用', 'ok'); }
+    else if (act === 'enable') { await api(`/admin/api/users/${id}/enable`, { method: 'POST' }); toast('已启用', 'ok'); }
+    else if (act === 'delete') { if (!confirm('确定删除该用户？其消息与好友关系也会一并清除。')) return; await api(`/admin/api/users/${id}/delete`, { method: 'POST' }); toast('已删除', 'ok'); }
+    else if (act === 'reset') {
+      const pw = prompt('输入新密码（至少 6 位）：'); if (!pw) return;
+      await api(`/admin/api/users/${id}/reset-password`, { method: 'POST', body: { newPassword: pw } }); toast('密码已重置', 'ok');
+    }
+    loadUsers(); loadStats();
+  } catch (err) { toast(err.message, 'err'); }
+});
+$('#addUser').addEventListener('click', async () => {
+  const username = $('#nu').value.trim(), password = $('#np').value, displayName = $('#nd').value.trim();
+  if (!username || !password || !displayName) return toast('请填全用户名/密码/昵称', 'err');
+  if (password.length < 6) return toast('密码至少 6 位', 'err');
+  try {
+    await api('/admin/api/users', { method: 'POST', body: { username, password, displayName } });
+    toast('用户已添加', 'ok'); $('#nu').value = ''; $('#np').value = ''; $('#nd').value = ''; loadUsers(); loadStats();
+  } catch (err) { toast(err.message, 'err'); }
+});
+
+/* ---------- 消息记录 ---------- */
+async function loadMessages() {
+  try {
+    const q = state.msgQ;
+    const d = await api(`/admin/api/messages?page=${state.msgPage}&size=50&q=${encodeURIComponent(q)}`);
+    $('#msgMeta').textContent = `共 ${d.total} 条，第 ${d.page + 1} 页`;
+    const tb = $('#msgTable tbody');
+    if (!d.messages.length) { tb.innerHTML = '<tr><td colspan="6" style="color:var(--muted)">无消息</td></tr>'; return; }
+    tb.innerHTML = d.messages.map(m => `
+      <tr>
+        <td>${fmtTime(m.timestamp)}</td>
+        <td>${m.senderId}</td>
+        <td>${m.recipientId}</td>
+        <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${m.conversationId}</td>
+        <td><span class="chip">${m.messageType}</span></td>
+        <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)">${m.preview || '(空)'}</td>
+      </tr>`).join('');
+  } catch (err) { toast(err.message, 'err'); }
+}
+$('#msgSearch').addEventListener('click', () => { state.msgQ = $('#msgQ').value.trim(); state.msgPage = 0; loadMessages(); });
+$('#msgRefresh').addEventListener('click', () => loadMessages());
+$('#msgPrev').addEventListener('click', () => { if (state.msgPage > 0) { state.msgPage--; loadMessages(); } });
+$('#msgNext').addEventListener('click', () => { state.msgPage++; loadMessages(); });
+
+/* ---------- 系统公告 ---------- */
+async function loadAnnouncements() {
+  try {
+    const d = await api('/admin/api/announcements');
+    const tb = $('#annTable tbody');
+    if (!d.announcements.length) { tb.innerHTML = '<tr><td colspan="4" style="color:var(--muted)">暂无公告</td></tr>'; return; }
+    tb.innerHTML = d.announcements.map(a => `
+      <tr>
+        <td>${fmtTime(a.timestamp)}</td>
+        <td>${escapeHtml(a.title)}</td>
+        <td style="max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)">${escapeHtml(a.content)}</td>
+        <td><button class="btn danger sm" data-del="${a.id}">删除</button></td>
+      </tr>`).join('');
+  } catch (err) { toast(err.message, 'err'); }
+}
+$('#annPost').addEventListener('click', async () => {
+  const title = $('#annTitle').value.trim(); const content = $('#annContent').value.trim();
+  if (!title || !content) return toast('标题与内容均不能为空', 'err');
+  try {
+    await api('/admin/api/announcement', { method: 'POST', body: { title, content } });
+    toast('公告已发布', 'ok'); $('#annTitle').value = ''; $('#annContent').value = '';
+    loadAnnouncements();
+  } catch (err) { toast(err.message, 'err'); }
+});
+$('#annTable').addEventListener('click', async (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  const id = b.dataset.del; if (!id) return;
+  if (!confirm('确定删除该公告？')) return;
+  try { await api(`/admin/api/announcement/${id}`, { method: 'DELETE' }); toast('已删除', 'ok'); loadAnnouncements(); }
+  catch (err) { toast(err.message, 'err'); }
+});
+
+/* ---------- 操作审计 ---------- */
+async function loadAudit() {
+  try {
+    const action = $('#auditFilter').value.trim();
+    const d = await api('/admin/api/audit?limit=100&offset=0' + (action ? '&action=' + encodeURIComponent(action) : ''));
+    $('#auditMeta').textContent = `共加载 ${d.entries.length} 条记录`;
+    const tb = $('#auditTable tbody');
+    if (!d.entries.length) { tb.innerHTML = '<tr><td colspan="4" style="color:var(--muted)">无记录</td></tr>'; return; }
+    tb.innerHTML = d.entries.map(x => `
+      <tr>
+        <td>${fmtTime(x.ts)}</td>
+        <td><span class="chip">${escapeHtml(x.action)}</span></td>
+        <td style="max-width:420px;color:var(--muted)">${escapeHtml(x.detail)}</td>
+        <td>${escapeHtml(x.admin || '-')}</td>
+      </tr>`).join('');
+  } catch (err) { toast(err.message, 'err'); }
+}
+$('#auditSearch').addEventListener('click', () => loadAudit());
+$('#auditRefresh').addEventListener('click', () => loadAudit());
+
+function escapeHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+}
+
+/* ---------- 改密弹窗（顶部暂未放置入口，保留能力）---------- */
+$('#mCancel').addEventListener('click', () => $('#pwModal').classList.add('hidden'));
+
+/* 启动时探测是否已登录 */
+(async () => {
+  try {
+    const c = await api('/admin/api/config');
+    // 能拿到说明已带有效 cookie
+    state.domain = c.serverDomain; state.retention = c.retentionDays;
+    enterApp();
+  } catch (_) { /* 未登录，显示登录页 */ }
+})();
+</script>
+</body>
+</html>

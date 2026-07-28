@@ -1,0 +1,246 @@
+package com.securechat.app.crypto
+
+import android.util.Base64
+import android.util.Log
+import com.securechat.app.crypto.keyexchange.RsaKeystoreManager
+import java.security.PublicKey
+import java.security.spec.X509EncodedKeySpec
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.SecretKeySpec
+import javax.inject.Inject
+import javax.inject.Singleton
+
+/**
+ * 信封加密引擎
+ *
+ * 工作原理（AES-256-GCM + RSA-2048 信封加密）：
+ * 1. 每次加密生成一个新的随机 AES 会话密钥（ephemeral）
+ * 2. 用该 AES 密钥加密消息体（AES-256-GCM）
+ * 3. 用收件人的 RSA 公钥包裹 AES 会话密钥
+ * 4. 最终格式：v1:<RSA加密的AES密钥>:<IV Base64>:<密文 Base64>
+ *
+ * 密钥管理：
+ *   - 所有 RSA 密钥统一由 RsaKeystoreManager 管理
+ *   - 别名格式：securechat_rsa_${userId}
+ *   - 解密时使用 RsaKeystoreManager.decryptWithLocalPrivateKey()
+ *   - 不再维护自己的 KeyStore 实例和 RSA_KEY_ALIAS
+ */
+@Singleton
+class MessageEncryptor @Inject constructor(
+    private val rsaKeystoreManager: RsaKeystoreManager
+) {
+
+    companion object {
+        private const val TAG = "MessageEncryptor"
+        private const val AES_KEY_SIZE = 256
+        private const val AES_GCM_IV_LENGTH = 12
+        private const val AES_GCM_TAG_LENGTH = 128
+    }
+
+    // ── Crypto operations ──
+
+    /**
+     * 用本地 RSA 私钥解包 AES 密钥
+     * 委托给 RsaKeystoreManager.decryptWithLocalPrivateKey()
+     */
+    private fun unwrapAesKey(encryptedAesKeyBytes: ByteArray): SecretKey? {
+        return try {
+            val decryptedBytes = rsaKeystoreManager.decryptWithLocalPrivateKey(encryptedAesKeyBytes)
+            SecretKeySpec(decryptedBytes, "AES")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to unwrap AES key", e)
+            null
+        }
+    }
+
+    /**
+     * 加密消息 — 信封加密
+     * @param plaintext 明文消息
+     * @param recipientPublicKeyPem 收件人的 RSA 公钥（PEM 字符串）
+     * @return 加密后 payload 字符串，或直接 null 表示失败
+     */
+    fun encryptMessage(
+        plaintext: String,
+        recipientPublicKeyPem: String
+    ): String? {
+        return try {
+            // 1. 生成随机 AES 会话密钥
+            val keyGen = KeyGenerator.getInstance("AES")
+            keyGen.init(AES_KEY_SIZE)
+            val sessionKey = keyGen.generateKey()
+
+            // 2. 生成随机 IV
+            val iv = ByteArray(AES_GCM_IV_LENGTH).also {
+                java.security.SecureRandom().nextBytes(it)
+            }
+
+            // 3. AES-GCM 加密消息体
+            val encryptCipher = Cipher.getInstance("AES/GCM/NoPadding")
+            encryptCipher.init(Cipher.ENCRYPT_MODE, sessionKey, GCMParameterSpec(AES_GCM_TAG_LENGTH, iv))
+            val ciphertext = encryptCipher.doFinal(plaintext.toByteArray(Charsets.UTF_8))
+
+            // 4. 用收件人（真实）RSA 公钥包裹 AES 会话密钥
+            val recipientPubKey = parsePublicKeyFromPem(recipientPublicKeyPem)
+            val wrapR = Cipher.getInstance("RSA/ECB/PKCS1Padding").apply {
+                init(Cipher.ENCRYPT_MODE, recipientPubKey)
+            }.doFinal(sessionKey.encoded)
+
+            // 5. 同时用发送者自己的 RSA 公钥包裹（双信封），使发送者本地也能解密自己发出的消息
+            val senderPem = rsaKeystoreManager.getPublicKeyPem()
+            val senderPubKey = parsePublicKeyFromPem(senderPem)
+            val wrapS = Cipher.getInstance("RSA/ECB/PKCS1Padding").apply {
+                init(Cipher.ENCRYPT_MODE, senderPubKey)
+            }.doFinal(sessionKey.encoded)
+
+            // 6. 组装 payload: v1:<收件人包裹>:<发送者包裹>:<IV>:<密文>
+            "v1:" + Base64.encodeToString(wrapR, Base64.NO_WRAP) + ":" +
+                Base64.encodeToString(wrapS, Base64.NO_WRAP) + ":" +
+                Base64.encodeToString(iv, Base64.NO_WRAP) + ":" +
+                Base64.encodeToString(ciphertext, Base64.NO_WRAP)
+        } catch (e: Exception) {
+            Log.e(TAG, "Encryption failed", e)
+            null
+        }
+    }
+
+    /**
+     * 解密消息 — 信封解密
+     * @param payload 加密 payload 字符串（v1:... 格式）
+     * @return 明文，失败返回 null
+     */
+    fun decryptMessage(payload: String): String? {
+        return try {
+            // 双信封格式: v1:<wrapR>:<wrapS>:<iv>:<ciphertext>
+            val parts = payload.split(":", limit = 5)
+            if (parts.size != 5 || parts[0] != "v1") {
+                Log.w(TAG, "Invalid payload version or format: ${parts.size} parts")
+                return null
+            }
+
+            // Step 1: 解包 AES 会话密钥（先试收件人包裹，失败再试发送者/自己包裹）
+            val wrappedR = Base64.decode(parts[1], Base64.NO_WRAP)
+            val wrappedS = Base64.decode(parts[2], Base64.NO_WRAP)
+            val sessionKey = unwrapEither(wrappedR, wrappedS) ?: return null
+
+            // Step 2: 解码 IV
+            val iv = Base64.decode(parts[3], Base64.NO_WRAP)
+
+            // Step 3: AES-GCM 解密
+            val decryptCipher = Cipher.getInstance("AES/GCM/NoPadding")
+            decryptCipher.init(Cipher.DECRYPT_MODE, sessionKey, GCMParameterSpec(AES_GCM_TAG_LENGTH, iv))
+            val plaintextBytes = decryptCipher.doFinal(Base64.decode(parts[4], Base64.NO_WRAP))
+
+            String(plaintextBytes, Charsets.UTF_8)
+        } catch (e: Exception) {
+            Log.e(TAG, "Decryption failed", e)
+            null
+        }
+    }
+
+    /**
+     * 加密字节数组（用于图片等二进制数据）— 信封加密
+     * 与 encryptMessage 相同流程，但直接以字节数组为明文输入。
+     * @return v1:<wrapR>:<wrapS>:<iv>:<密文Base64> 格式 payload
+     */
+    fun encryptBytes(
+        plainBytes: ByteArray,
+        recipientPublicKeyPem: String
+    ): String? {
+        return try {
+            val keyGen = KeyGenerator.getInstance("AES")
+            keyGen.init(AES_KEY_SIZE)
+            val sessionKey = keyGen.generateKey()
+
+            val iv = ByteArray(AES_GCM_IV_LENGTH).also {
+                java.security.SecureRandom().nextBytes(it)
+            }
+
+            val encryptCipher = Cipher.getInstance("AES/GCM/NoPadding")
+            encryptCipher.init(Cipher.ENCRYPT_MODE, sessionKey, GCMParameterSpec(AES_GCM_TAG_LENGTH, iv))
+            val ciphertext = encryptCipher.doFinal(plainBytes)
+
+            val recipientPubKey = parsePublicKeyFromPem(recipientPublicKeyPem)
+            val wrapR = Cipher.getInstance("RSA/ECB/PKCS1Padding").apply {
+                init(Cipher.ENCRYPT_MODE, recipientPubKey)
+            }.doFinal(sessionKey.encoded)
+
+            val senderPem = rsaKeystoreManager.getPublicKeyPem()
+            val senderPubKey = parsePublicKeyFromPem(senderPem)
+            val wrapS = Cipher.getInstance("RSA/ECB/PKCS1Padding").apply {
+                init(Cipher.ENCRYPT_MODE, senderPubKey)
+            }.doFinal(sessionKey.encoded)
+
+            "v1:" + Base64.encodeToString(wrapR, Base64.NO_WRAP) + ":" +
+                Base64.encodeToString(wrapS, Base64.NO_WRAP) + ":" +
+                Base64.encodeToString(iv, Base64.NO_WRAP) + ":" +
+                Base64.encodeToString(ciphertext, Base64.NO_WRAP)
+        } catch (e: Exception) {
+            Log.e(TAG, "Byte encryption failed", e)
+            null
+        }
+    }
+
+    /**
+     * 解密字节数组（图片等二进制）— 信封解密
+     * @return 明文字节数组，失败返回 null
+     */
+    fun decryptBytes(payload: String): ByteArray? {
+        return try {
+            val parts = payload.split(":", limit = 5)
+            if (parts.size != 5 || parts[0] != "v1") {
+                Log.w(TAG, "Invalid byte payload version or format: ${parts.size} parts")
+                return null
+            }
+            val wrappedR = Base64.decode(parts[1], Base64.NO_WRAP)
+            val wrappedS = Base64.decode(parts[2], Base64.NO_WRAP)
+            val sessionKey = unwrapEither(wrappedR, wrappedS) ?: return null
+            val iv = Base64.decode(parts[3], Base64.NO_WRAP)
+            val decryptCipher = Cipher.getInstance("AES/GCM/NoPadding")
+            decryptCipher.init(Cipher.DECRYPT_MODE, sessionKey, GCMParameterSpec(AES_GCM_TAG_LENGTH, iv))
+            decryptCipher.doFinal(Base64.decode(parts[4], Base64.NO_WRAP))
+        } catch (e: Exception) {
+            Log.e(TAG, "Byte decryption failed", e)
+            null
+        }
+    }
+
+    /**
+     * 双信封解包：先用收件人包裹，失败再用发送者（自己）包裹解密。
+     * 仅与本地私钥匹配的包裹能成功解包。
+     */
+    private fun unwrapEither(wrappedR: ByteArray, wrappedS: ByteArray): SecretKey? {
+        unwrapAesKey(wrappedR)?.let { return it }
+        return unwrapAesKey(wrappedS)
+    }
+
+    /**
+     * 获取本用户的 RSA 公钥（PEM 字符串），委托给 RsaKeystoreManager
+     */
+    fun getLocalPublicKeyPem(): String? {
+        return try {
+            rsaKeystoreManager.getPublicKeyPem()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get local public key PEM", e)
+            null
+        }
+    }
+
+    /**
+     * 从 PEM 字符串解析 PublicKey
+     */
+    private fun parsePublicKeyFromPem(pem: String): PublicKey {
+        val cleaned = pem
+            .replace("-----BEGIN PUBLIC KEY-----", "")
+            .replace("-----END PUBLIC KEY-----", "")
+            .replace("\n", "")
+            .replace("\r", "")
+            .trim()
+        val encoded = Base64.decode(cleaned, Base64.NO_WRAP)
+        val spec = X509EncodedKeySpec(encoded)
+        val factory = java.security.KeyFactory.getInstance("RSA")
+        return factory.generatePublic(spec)
+    }
+}

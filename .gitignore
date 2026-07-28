@@ -1,0 +1,31 @@
+# ===== Android / Gradle =====
+*.iml
+.gradle/
+build/
+local.properties
+captures/
+.idea/
+*.apk
+*.aar
+app/release/
+.DS_Store
+
+# ===== Node / server =====
+node_modules/
+dist/
+npm-debug.log*
+server/node_modules/
+server/dist/
+
+# ===== Backups / temp / secrets =====
+*.bak
+*.bak2
+*.log
+*.tmp
+.env
+.env.*
+!.env.example
+
+# ===== AI 生成的临时文档（artifact 残留，不进版本库）=====
+app/src/main/java/com/securechat/app/overview.md
+app/src/main/java/com/securechat/app/progress-report.md

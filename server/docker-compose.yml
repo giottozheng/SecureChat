@@ -1,0 +1,59 @@
+# SecureChat 服务端 docker compose
+# 用法：
+#   cd server
+#   cp .env.example .env   # 编辑 JWT_SECRET / ADMIN_INITIAL_PASSWORD 等
+#   docker compose up -d
+#
+# 数据持久化：
+#   securechat-data  -> /app/data           全部运行时状态（用户/消息/配置/崩溃日志）
+#   securechat-apk   -> /app/public/apk     OTA 安装包（如需自动更新）
+# 命名卷首次会从镜像复制目录归属（node 用户），天然规避主机权限问题。
+
+services:
+  securechat-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: securechat-server
+    ports:
+      - "${PORT:-8080}:8080"
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - PORT=8080
+      - HOST=0.0.0.0
+    volumes:
+      - securechat-data:/app/data
+      - securechat-apk:/app/public/apk
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.50"
+
+volumes:
+  securechat-data:
+  securechat-apk:
+
+# ── OTA 自动更新（可选扩展）──────────────────────────────
+# 若要让容器内服务直接对外分发 APK（/ota/dl、/ota/check），
+# 改用 bind 挂载，把本地构建产出的 apk 目录与 update.json 挂进容器：
+#
+# services:
+#   securechat-server:
+#     ...
+#     volumes:
+#       - ./data:/app/data
+#       - ./update.json:/app/public/update.json
+#       - ./apk:/app/public/apk
+#
+# 注意：update.json 首次需自行创建并设置可写权限（如 chmod 666 update.json），
+#       否则容器内 node 用户无法写入。

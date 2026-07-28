@@ -26,7 +26,7 @@
 
 ```
 app/        Android 客户端源码（Kotlin + Compose）
-server/     Node.js 服务端（src/server.ts 为权威源码，public/admin 为管理后台 UI）
+server/     Node.js 服务端（src/server.ts 为权威源码，public/admin 为管理后台 UI；含 Dockerfile / docker-compose.yml 容器化部署）
 ```
 
 ## 快速开始
@@ -41,9 +41,26 @@ cp .env.example .env        # 填入 JWT_SECRET / ADMIN_INITIAL_PASSWORD 等
 node dist/server.js         # 启动（建议用看门狗 / systemd 守护）
 ```
 
-- 配置项见 [`.env.example`](.env.example)
+- 配置项见 [`server/.env.example`](server/.env.example)
 - 管理后台： `http://<server>:8080/admin`（账号 `admin`，**首次登录强制改密**）
 - 健康探测： `GET /health` 返回 200
+
+#### 使用 Docker 部署（推荐一键）
+
+服务端内置 `Dockerfile` 与 `docker-compose.yml`，多阶段构建、仅含生产依赖、内置健康检查：
+
+```bash
+cd server
+cp .env.example .env        # 编辑 JWT_SECRET / ADMIN_INITIAL_PASSWORD / SERVER_DOMAIN
+docker compose up -d        # 构建镜像并在 8080 端口启动
+```
+
+- 数据持久化（命名卷，自动规避主机权限问题）：
+  - `securechat-data` → `/app/data`（用户 / 消息 / 配置 / 崩溃日志）
+  - `securechat-apk`  → `/app/public/apk`（OTA 安装包，如需自动更新）
+- 默认监听 `0.0.0.0:8080`，可用 `PORT` 环境变量或 compose 的 `ports` 映射调整
+- 查看日志： `docker compose logs -f securechat-server`；停止： `docker compose down`（数据卷保留）
+- **OTA 自动更新（可选）**：让容器内服务直接对外分发 APK（`/ota/dl`、`/ota/check`）时，改用 bind 挂载 `./apk` 与 `./update.json`，详见 `server/docker-compose.yml` 末尾注释
 
 ### Android 客户端
 

@@ -5,6 +5,8 @@ import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.securechat.app.repository.AccountRepository
+import com.securechat.app.repository.MessageRepository
+import com.securechat.app.crypto.keyexchange.RsaKeystoreManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -26,7 +28,9 @@ data class SettingsUiState(
 @HiltViewModel
 class SettingsViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val accountRepository: AccountRepository
+    private val accountRepository: AccountRepository,
+    private val messageRepository: MessageRepository,
+    private val rsaKeystoreManager: RsaKeystoreManager
 ) : ViewModel() {
 
     private val prefs = context.getSharedPreferences("securechat_prefs", Context.MODE_PRIVATE)
@@ -70,6 +74,42 @@ class SettingsViewModel @Inject constructor(
 
     fun clearMessage() {
         _uiState.update { it.copy(message = null) }
+    }
+
+    /**
+     * 重新同步密钥：解决「对方发来的消息显示无法解密」这类因密钥体系切换/版本升级
+     * 导致对端仍持有旧公钥缓存的问题。
+     * 1) 清空本机对端公钥缓存，使下次发送强制重新拉取最新公钥；
+     * 2) 重新上传本机公钥到服务端（服务端会自增 keyEpoch）；
+     * 3) 重新拉取好友列表（含最新 keyEpoch），刷新本地对端版本号表。
+     * 对端在下一次发送时会检测到 keyEpoch 变化并自动重新拉取本用户新公钥，无需手动重启。
+     */
+    fun reSyncKeys() {
+        viewModelScope.launch {
+            val userId = prefs.getString("auth_user_id", "") ?: ""
+            val token = prefs.getString("auth_token", "") ?: ""
+            if (userId.isBlank() || token.isBlank()) {
+                _uiState.update { it.copy(message = "未登录，无法同步密钥") }
+                return@launch
+            }
+            try {
+                messageRepository.invalidatePeerCache()
+                val pem = rsaKeystoreManager.getPublicKeyPem()
+                accountRepository.registerPublicKey(userId, token, pem)
+                    .onFailure { e ->
+                        _uiState.update { it.copy(message = "公钥上传失败: ${e.message}") }
+                        return@launch
+                    }
+                accountRepository.fetchFriends()
+                    .onFailure { e ->
+                        _uiState.update { it.copy(message = "好友列表刷新失败: ${e.message}") }
+                        return@launch
+                    }
+                _uiState.update { it.copy(message = "密钥已重新同步，对方将自动获取新公钥") }
+            } catch (e: Exception) {
+                _uiState.update { it.copy(message = "同步失败: ${e.message}") }
+            }
+        }
     }
 
     /**

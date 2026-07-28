@@ -61,6 +61,7 @@ interface User {
   password: string;
   displayName: string;
   publicKey: string;
+  keyEpoch?: number;      // 公钥版本号：registerPublicKey 时自增，供对端检测密钥变更后自动重新拉取
   avatarUrl?: string;     // 头像 URL（/avatars/<id>.jpg，明文公开，非聊天内容）
   enabled?: boolean;     // 账号是否启用（后台可禁用）
   createdAt?: number;    // 注册时间（毫秒）
@@ -648,6 +649,7 @@ app.get('/api/users/:userId/public-key', (req: Request, res: Response) => {
     userId: user.id,
     displayName: user.displayName,
     publicKeyPem: user.publicKey,
+    keyEpoch: user.keyEpoch || 0,
     avatarUrl: user.avatarUrl
   });
 });
@@ -672,9 +674,10 @@ app.post('/api/keys/register', (req: Request, res: Response) => {
     return;
   }
   user.publicKey = publicKeyPem;
-  console.log(`[KEY] Registered real public key for ${user.id}`);
+  user.keyEpoch = (user.keyEpoch || 0) + 1;
+  console.log(`[KEY] Registered real public key for ${user.id} (epoch ${user.keyEpoch})`);
   scheduleSave();
-  res.json({ success: true, userId: user.id, registered: true });
+  res.json({ success: true, userId: user.id, registered: true, keyEpoch: user.keyEpoch });
 });
 
 // ── 消息轮询 ──
@@ -840,6 +843,7 @@ app.get('/api/contacts', (req: Request, res: Response) => {
     id: u!.id,
     displayName: u!.displayName,
     publicKey: u!.publicKey,
+    keyEpoch: u!.keyEpoch || 0,
     avatarUrl: u!.avatarUrl,
     online: !!Array.from(connectedClients.keys()).find(k => k.startsWith(`${u!.id}:`))
   })));

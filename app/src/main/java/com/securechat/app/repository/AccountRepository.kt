@@ -245,6 +245,7 @@ class AccountRepository @Inject constructor(
             val friends = mutableListOf<FriendEntity>()
             val nameMap = mutableMapOf<String, String>()
             val avatarMap = mutableMapOf<String, String>()
+            val epochMap = mutableMapOf<String, Long>()
             for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i)
                 val id = o.optString("id")
@@ -261,11 +262,14 @@ class AccountRepository @Inject constructor(
                 )
                 nameMap[id] = name
                 if (avatar != null) avatarMap[id] = avatar
+                epochMap[id] = o.optLong("keyEpoch", 0L)
             }
             friendDao.clearFriends()
             friendDao.upsertFriends(friends)
             remoteDisplayNameOverrides = nameMap
             remoteAvatarOverrides = avatarMap
+            // 把每个好友的公钥版本号写入共享表，供发送加密时检测密钥变更
+            com.securechat.app.crypto.PeerKeyEpochStore.update(epochMap)
             Log.i(TAG, "Fetched ${friends.size} friends")
             Result.success(Unit)
         } catch (e: Exception) {

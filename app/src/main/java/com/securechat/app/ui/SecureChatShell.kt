@@ -309,6 +309,7 @@ fun NavGraphBuilder.tabContainer(
             onChangePassword = { old, new -> settingsVm.changePassword(old, new) },
             onClearCache = { /* TODO: clear cache */ },
             onResetKeys = { /* TODO: reset all keys */ },
+            onResyncKeys = { settingsVm.reSyncKeys() },
             onLogout = onLogout,
             onAbout = { /* TODO: show about dialog */ }
         )

@@ -50,21 +50,34 @@ class MessageRepository @Inject constructor(
             .build()
     }
 
-    // 服务端公钥缓存：recipientId -> PEM（避免每次发送都网络请求）
-    private val remotePublicKeyCache = mutableMapOf<String, String>()
+    // 服务端公钥缓存：recipientId -> (PEM, 缓存时的 keyEpoch)（避免每次发送都网络请求）
+    private data class CachedPeerKey(val pem: String, val epoch: Long)
+    private val remotePublicKeyCache = mutableMapOf<String, CachedPeerKey>()
+
+    /**
+     * 清空对端公钥缓存。在「重新同步密钥」时调用，迫使下次发送重新拉取最新公钥。
+     */
+    fun invalidatePeerCache() {
+        remotePublicKeyCache.clear()
+    }
 
     /**
      * 获取收件人的真实 RSA 公钥：优先缓存，否则从服务端拉取（收件人登录时已注册）。
+     * 当已知对端 keyEpoch 大于缓存中的 epoch 时，视为密钥已变更，强制重新拉取。
      */
     private suspend fun getRecipientPublicKey(recipientId: String, authToken: String): String? {
-        remotePublicKeyCache[recipientId]?.let { return it }
+        val knownEpoch = com.securechat.app.crypto.PeerKeyEpochStore.get(recipientId)
+        val cached = remotePublicKeyCache[recipientId]
+        if (cached != null && (knownEpoch == null || cached.epoch >= knownEpoch)) {
+            return cached.pem
+        }
         var key = fetchRecipientPublicKeyFromServer(recipientId, authToken)
         if (key.isNullOrBlank()) {
             // 兜底重试一次：对方可能刚启动应用，公钥尚未注册到服务器
             kotlinx.coroutines.delay(800)
             key = fetchRecipientPublicKeyFromServer(recipientId, authToken)
         }
-        if (!key.isNullOrBlank()) remotePublicKeyCache[recipientId] = key
+        if (!key.isNullOrBlank()) remotePublicKeyCache[recipientId] = CachedPeerKey(key, knownEpoch ?: 0L)
         return key
     }
 
@@ -84,7 +97,10 @@ class MessageRepository @Inject constructor(
                 if (response.isSuccessful) {
                     val body = response.body?.string()
                     val json = org.json.JSONObject(body ?: "{}")
-                    json.optString("publicKeyPem", "").takeIf { it.isNotBlank() }
+                    val pem = json.optString("publicKeyPem", "").takeIf { it.isNotBlank() }
+                    val epoch = json.optLong("keyEpoch", 0L)
+                    if (pem != null) com.securechat.app.crypto.PeerKeyEpochStore.set(recipientId, epoch)
+                    pem
                 } else {
                     Log.w(TAG, "Fetch recipient key HTTP ${response.code} for $recipientId")
                     null

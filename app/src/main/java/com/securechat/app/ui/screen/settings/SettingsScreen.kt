@@ -55,6 +55,7 @@ fun SettingsScreen(
     onChangePassword: (String, String) -> Unit = { _, _ -> },
     onClearCache: () -> Unit = {},
     onResetKeys: () -> Unit = {},
+    onResyncKeys: () -> Unit = {},
     onLogout: () -> Unit = {},
     onAbout: () -> Unit = {},
     userId: String = ""
@@ -62,6 +63,7 @@ fun SettingsScreen(
     var showLogoutDialog by remember { mutableStateOf(false) }
     var showResetDialog by remember { mutableStateOf(false) }
     var showClearDialog by remember { mutableStateOf(false) }
+    var showResyncDialog by remember { mutableStateOf(false) }
     var showNicknameDialog by remember { mutableStateOf(false) }
     var showPasswordDialog by remember { mutableStateOf(false) }
     var nicknameInput by remember { mutableStateOf(displayName) }
@@ -148,6 +150,24 @@ fun SettingsScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showResetDialog = false }) { Text("取消") }
+            }
+        )
+    }
+
+    if (showResyncDialog) {
+        AlertDialog(
+            onDismissRequest = { showResyncDialog = false },
+            title = { Text("重新同步密钥") },
+            text = {
+                Text("当对方发来的消息显示「无法解密」时，点击此处可重新上传你的公钥并刷新好友密钥版本。对方在下一次发送时会自动获取你的新公钥，通常无需对方手动重启应用。")
+            },
+            confirmButton = {
+                TextButton(onClick = { showResyncDialog = false; onResyncKeys() }) {
+                    Text("重新同步")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showResyncDialog = false }) { Text("取消") }
             }
         )
     }
@@ -499,6 +519,15 @@ fun SettingsScreen(
                 leadingContent = { Icon(Icons.Default.DeleteSweep, contentDescription = null) },
                 trailingContent = {
                     TextButton(onClick = { showClearDialog = true }) { Text("清除") }
+                }
+            )
+
+            ListItem(
+                headlineContent = { Text("重新同步密钥") },
+                supportingContent = { Text("对方消息显示「无法解密」时，刷新你的公钥与好友密钥版本") },
+                leadingContent = { Icon(Icons.Default.Sync, contentDescription = null) },
+                trailingContent = {
+                    TextButton(onClick = { showResyncDialog = true }) { Text("同步") }
                 }
             )
 

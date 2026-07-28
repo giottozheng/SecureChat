@@ -6,6 +6,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import androidx.core.app.ServiceCompat
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -208,22 +209,31 @@ class PushConnectionService : Service() {
 
     /**
      * 任务被用户从最近任务列表移除时触发。
-     * 主动重启前台服务（进程被划掉后立刻恢复长连接，且只重启 Service 不重启 Activity，
-     * 因此「最近任务」里不会出现 App 卡片），并再次武装 AlarmManager 看门狗作为兜底，
-     * 使「划掉 app 仍收消息」更接近微信体验。
      *
-     * 注：Android 12+ 限制后台启动前台服务，但本服务声明了 foregroundServiceType="dataSync"
-     * （属豁免类型），故此处 startForegroundService 在后台可正常执行。
-     * 若 OEM（如 ColorOS）在划掉时直接强杀导致本回调失效，则由 PollingReceiver 看门狗在
-     * 下一次闹钟（≤30s）时检测 isAlive 并重新拉起。
+     * Android 14(API 34)+ 对 dataSync 等前台服务引入「任务移除后超时停止」硬限制：
+     * 若服务未在超时窗口内停止，框架直接抛 ForegroundServiceDidNotStopInTimeException
+     * （主线程 FATAL，杀进程）。本服务为 START_STICKY 长驻前台服务，划掉后仍存活，
+     * 若不主动停止必然触发该崩溃。故在回调内（API 34+）主动 stopForeground + stopSelf，
+     * 使超时计时器无对象可抛。服务停止后由 PollingReceiver 看门狗（≤30s）检测 isAlive=false
+     * 并从后台重新拉起长连接（dataSync 后台启动豁免）；看门狗同时触发 SyncWorker 做 HTTP
+     * 兜底同步，停机窗口不会丢消息。
+     *
+     * 仅 API 34+ 需要此停服动作；旧版本无该超时限制且需保持长连，故不改其行为。
      */
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
-        // 注意：不再于 onTaskRemoved 内同步 startForegroundService —— 该调用会触发
-        // ForegroundServiceDidNotStopInTimeException（前台服务未在超时内停止），主线程
-        // FATAL 导致进程被杀、且会加剧推送不稳定。改由下方 PollingReceiver 看门狗（≤30s）
-        // 检测 isAlive 后重新拉起长连接，避免崩溃。
-        // 兜底：确保看门狗闹钟已武装（ColorOS 可能在上一次强杀时取消了闹钟）
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            try {
+                ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+            } catch (e: Exception) {
+                Log.w(TAG, "onTaskRemoved stopForeground 失败", e)
+            }
+            stopping = true
+            isAlive = false
+            stopSelf()
+        }
+        // 兜底：确保看门狗闹钟已武装（ColorOS 可能在上一次强杀时取消了闹钟），
+        // 服务停止后由其在下一次闹钟重新拉起长连接。
         try {
             PollingReceiver.schedulePolling(this, 30_000L)
         } catch (e: Exception) {

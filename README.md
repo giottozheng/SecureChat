@@ -60,6 +60,18 @@ docker compose up -d        # 构建镜像并在 8080 端口启动
   - `securechat-apk`  → `/app/public/apk`（OTA 安装包，如需自动更新）
 - 默认监听 `0.0.0.0:8080`，可用 `PORT` 环境变量或 compose 的 `ports` 映射调整
 - 查看日志： `docker compose logs -f securechat-server`；停止： `docker compose down`（数据卷保留）
+
+> **⚠️ 网络受限环境（如部分国内网络无法访问 Docker Hub）**：
+> 构建时若卡在 `pulling node:20-alpine` 并报 `connection refused / registry-1.docker.io`，
+> 需为 Docker 守护进程配置一个可达的 registry 镜像源。例如：
+> ```bash
+> sudo mkdir -p /etc/docker
+> sudo tee /etc/docker/daemon.json <<'EOF'
+> { "registry-mirrors": ["https://docker.m.daocloud.io"] }
+> EOF
+> sudo systemctl restart docker
+> ```
+> 重启后再执行 `docker compose up -d` 即可。npm 源一般不受影响（registry.npmjs.org 通常可达）。
 - **OTA 自动更新（可选）**：让容器内服务直接对外分发 APK（`/ota/dl`、`/ota/check`）时，改用 bind 挂载 `./apk` 与 `./update.json`，详见 `server/docker-compose.yml` 末尾注释
 
 ### Android 客户端

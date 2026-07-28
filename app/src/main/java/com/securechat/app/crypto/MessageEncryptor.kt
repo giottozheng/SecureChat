@@ -38,6 +38,22 @@ class MessageEncryptor @Inject constructor(
         private const val AES_KEY_SIZE = 256
         private const val AES_GCM_IV_LENGTH = 12
         private const val AES_GCM_TAG_LENGTH = 128
+
+        /**
+         * 获取一个允许调用者指定 IV 的 AES/GCM Cipher。
+         * 平台默认 provider(AndroidKeyStoreBCWorkaround)在 Android 9+ 拒绝 caller-provided IV，
+         * 因此显式选择支持该用法的 provider(BC / AndroidOpenSSL / SunJCE / SunPKCS11)。
+         */
+        private fun getAesGcmCipher(): Cipher {
+            val providers = listOf("BC", "AndroidOpenSSL", "SunJCE", "SunPKCS11")
+            for (p in providers) {
+                try {
+                    return Cipher.getInstance("AES/GCM/NoPadding", p)
+                } catch (_: Exception) {
+                }
+            }
+            return getAesGcmCipher()
+        }
     }
 
     // ── Crypto operations ──
@@ -78,7 +94,7 @@ class MessageEncryptor @Inject constructor(
             }
 
             // 3. AES-GCM 加密消息体
-            val encryptCipher = Cipher.getInstance("AES/GCM/NoPadding")
+            val encryptCipher = getAesGcmCipher()
             encryptCipher.init(Cipher.ENCRYPT_MODE, sessionKey, GCMParameterSpec(AES_GCM_TAG_LENGTH, iv))
             val ciphertext = encryptCipher.doFinal(plaintext.toByteArray(Charsets.UTF_8))
 
@@ -129,7 +145,7 @@ class MessageEncryptor @Inject constructor(
             val iv = Base64.decode(parts[3], Base64.NO_WRAP)
 
             // Step 3: AES-GCM 解密
-            val decryptCipher = Cipher.getInstance("AES/GCM/NoPadding")
+            val decryptCipher = getAesGcmCipher()
             decryptCipher.init(Cipher.DECRYPT_MODE, sessionKey, GCMParameterSpec(AES_GCM_TAG_LENGTH, iv))
             val plaintextBytes = decryptCipher.doFinal(Base64.decode(parts[4], Base64.NO_WRAP))
 
@@ -158,7 +174,7 @@ class MessageEncryptor @Inject constructor(
                 java.security.SecureRandom().nextBytes(it)
             }
 
-            val encryptCipher = Cipher.getInstance("AES/GCM/NoPadding")
+            val encryptCipher = getAesGcmCipher()
             encryptCipher.init(Cipher.ENCRYPT_MODE, sessionKey, GCMParameterSpec(AES_GCM_TAG_LENGTH, iv))
             val ciphertext = encryptCipher.doFinal(plainBytes)
 
@@ -198,7 +214,7 @@ class MessageEncryptor @Inject constructor(
             val wrappedS = Base64.decode(parts[2], Base64.NO_WRAP)
             val sessionKey = unwrapEither(wrappedR, wrappedS) ?: return null
             val iv = Base64.decode(parts[3], Base64.NO_WRAP)
-            val decryptCipher = Cipher.getInstance("AES/GCM/NoPadding")
+            val decryptCipher = getAesGcmCipher()
             decryptCipher.init(Cipher.DECRYPT_MODE, sessionKey, GCMParameterSpec(AES_GCM_TAG_LENGTH, iv))
             decryptCipher.doFinal(Base64.decode(parts[4], Base64.NO_WRAP))
         } catch (e: Exception) {

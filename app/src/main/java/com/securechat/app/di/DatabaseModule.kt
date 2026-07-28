@@ -7,6 +7,7 @@ import com.securechat.app.data.local.FriendDao
 import com.securechat.app.data.local.FriendRequestDao
 import com.securechat.app.data.local.MessageDao
 import com.securechat.app.data.local.MessageDatabase
+import com.securechat.app.data.local.MIGRATION_4_5
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -35,6 +36,7 @@ object DatabaseModule {
             // 注意：破坏性回退仅限定在 2/3 版；未来从 version 4 改表必须写显式 Migration，
             // 否则 Room 会直接崩溃暴露问题，不会再次静默清空数据。
             .fallbackToDestructiveMigrationFrom(2, 3)
+            .addMigrations(MIGRATION_4_5)
             .build()
     }
     

@@ -1,12 +1,14 @@
 package com.securechat.app.repository
 
 import android.content.Context
+import android.util.Base64
 import android.util.Log
 import com.securechat.app.data.local.FriendDao
 import com.securechat.app.data.local.FriendEntity
 import com.securechat.app.data.local.FriendRequestDao
 import com.securechat.app.data.local.FriendRequestEntity
 import com.securechat.app.util.remoteDisplayNameOverrides
+import com.securechat.app.util.remoteAvatarOverrides
 import com.securechat.app.util.ServerConfig
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
@@ -188,6 +190,40 @@ class AccountRepository @Inject constructor(
         }
     }
 
+    // ── 头像上传 ──
+
+    /**
+     * 上传本机头像（JPEG 字节）到服务端，成功后服务端返回相对路径 avatarUrl。
+     * 图片在调用处已压缩为 JPEG（≤约数百 KB），此处仅做 base64 编码后 POST。
+     */
+    suspend fun uploadAvatar(imageBytes: ByteArray): Result<String> = withContext(Dispatchers.IO) {
+        try {
+            val base64 = Base64.encodeToString(imageBytes, Base64.NO_WRAP)
+            val json = JSONObject().apply {
+                put("avatar", base64)
+                put("mime", "image/jpeg")
+            }
+            val req = Request.Builder()
+                .url(ServerConfig.getUrl(context, "/api/users/me/avatar"))
+                .addHeader("Authorization", "Bearer $authToken")
+                .post(json.toString().toRequestBody("application/json".toMediaType()))
+                .build()
+            val resp = http.newCall(req).execute()
+            val body = resp.body?.string().orEmpty()
+            resp.close()
+            if (resp.isSuccessful) {
+                val url = JSONObject(body).optString("avatarUrl", "")
+                if (url.isBlank()) Result.failure(Exception("服务端未返回头像地址"))
+                else Result.success(url)
+            } else {
+                Result.failure(Exception("上传失败: $body"))
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "uploadAvatar failed", e)
+            Result.failure(e)
+        }
+    }
+
     // ── 联系人名称缓存（昵称修改后对其他成员即时生效）──
 
     /**
@@ -208,23 +244,28 @@ class AccountRepository @Inject constructor(
             val arr = JSONArray(body)
             val friends = mutableListOf<FriendEntity>()
             val nameMap = mutableMapOf<String, String>()
+            val avatarMap = mutableMapOf<String, String>()
             for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i)
                 val id = o.optString("id")
                 val name = o.optString("displayName", id)
+                val avatar = o.optString("avatarUrl", "").ifBlank { null }
                 friends.add(
                     FriendEntity(
                         userId = id,
                         displayName = name,
                         publicKey = o.optString("publicKey", ""),
-                        isOnline = o.optBoolean("online", false)
+                        isOnline = o.optBoolean("online", false),
+                        avatarUrl = avatar
                     )
                 )
                 nameMap[id] = name
+                if (avatar != null) avatarMap[id] = avatar
             }
             friendDao.clearFriends()
             friendDao.upsertFriends(friends)
             remoteDisplayNameOverrides = nameMap
+            remoteAvatarOverrides = avatarMap
             Log.i(TAG, "Fetched ${friends.size} friends")
             Result.success(Unit)
         } catch (e: Exception) {
@@ -297,11 +338,16 @@ class AccountRepository @Inject constructor(
                 JSONObject(body).optJSONArray("contacts") ?: JSONArray()
             }
             val map = mutableMapOf<String, String>()
+            val avatarMap = mutableMapOf<String, String>()
             for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i)
-                map[o.optString("id")] = o.optString("displayName")
+                val id = o.optString("id")
+                map[id] = o.optString("displayName")
+                val av = o.optString("avatarUrl", "").ifBlank { null }
+                if (av != null) avatarMap[id] = av
             }
             remoteDisplayNameOverrides = map
+            remoteAvatarOverrides = avatarMap
             Log.i(TAG, "Cached ${map.size} contact display names")
             Result.success(Unit)
         } catch (e: Exception) {

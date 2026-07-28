@@ -13,8 +13,8 @@ android {
         applicationId = "com.securechat.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 65
-        versionName = "1.0.64"
+        versionCode = 66
+        versionName = "1.0.65"
 
         buildConfigField("String", "API_BASE_URL", "\"http://192.168.10.99:8080\"")
         buildConfigField("Boolean", "ENABLE_LOGGING", "true")
@@ -121,6 +121,9 @@ dependencies {
 
     // ── Gson ──
     implementation("com.google.code.gson:gson:2.10.1")
+
+    // coil: avatar image loading
+    implementation("io.coil-kt:coil-compose:2.6.0")
 
     // ── Firebase Messaging (only for local token registration) ──
     // No FCM library needed — we use self-built push. Removed.

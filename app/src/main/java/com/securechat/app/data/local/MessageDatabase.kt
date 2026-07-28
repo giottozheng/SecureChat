@@ -148,6 +148,7 @@ data class FriendEntity(
     val displayName: String,
     val publicKey: String,
     val isOnline: Boolean = false,
+    val avatarUrl: String? = null,
     val updatedAt: Long = System.currentTimeMillis()
 )
 
@@ -177,7 +178,7 @@ interface FriendDao {
         FriendRequestEntity::class,
         FriendEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 abstract class MessageDatabase : RoomDatabase() {
@@ -206,3 +207,13 @@ abstract class MessageDatabase : RoomDatabase() {
  *   fallbackToDestructiveMigrationFrom(2, 3) 已把破坏性回退**仅限定**在 2/3 版，
  *   未来若从 4 改表却漏写迁移，Room 会直接启动崩溃暴露问题，而不是静默清空数据。
  */
+
+/**
+ * 数据库迁移 4 → 5：好友表新增 avatar_url 列（头像相对路径，可空）。
+ * 对应 FriendEntity.avatarUrl 字段（Room 默认列名 avatar_url）。
+ */
+val MIGRATION_4_5 = object : Migration(4, 5) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE friends ADD COLUMN avatar_url TEXT")
+    }
+}

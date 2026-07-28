@@ -61,6 +61,7 @@ interface User {
   password: string;
   displayName: string;
   publicKey: string;
+  avatarUrl?: string;     // 头像 URL（/avatars/<id>.jpg，明文公开，非聊天内容）
   enabled?: boolean;     // 账号是否启用（后台可禁用）
   createdAt?: number;    // 注册时间（毫秒）
 }
@@ -71,7 +72,7 @@ interface LoginResponse {
   userId?: string;
   deviceToken?: string;
   error?: string;
-  userProfile?: { id: string; displayName: string; publicKey: string };
+  userProfile?: { id: string; displayName: string; publicKey: string; avatarUrl?: string };
 }
 
 // ── 内存存储 ──
@@ -453,6 +454,9 @@ app.post('/api/crash', express.text({ type: '*/*', limit: '1mb' }), (req: Reques
 
 // ── OTA 远程升级 ──
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
+// 头像存储目录（复用 STATE_DIR 持久化卷，服务重启后文件仍在）
+const AVATAR_DIR = path.join(STATE_DIR, 'avatars');
+try { fs.mkdirSync(AVATAR_DIR, { recursive: true }); } catch (_) {}
 const UPDATE_JSON_PATH = path.join(PUBLIC_DIR, 'update.json');
 
 // OTA：禁止任何中间代理/运营商缓存版本检查与 APK 静态文件
@@ -500,6 +504,8 @@ app.get('/ota/dl/:token', (req: Request, res: Response) => {
 
 // 提供 APK 下载（无需鉴权，便于内部分发；保留作为浏览器手动下载兜底）
 app.use('/apk', express.static(path.join(PUBLIC_DIR, 'apk')));
+// 头像静态访问（公开 GET，头像不属于敏感聊天内容）
+app.use('/avatars', express.static(AVATAR_DIR));
 
 // OTA 检查更新（缓存破坏放 path 版）：部分运营商透明代理按 URL path 缓存、忽略 query 参数，
 // 导致旧版 ?_=时间戳 缓存破坏完全失效（客户端一直拿到 1.0.6 等陈旧响应）。
@@ -606,6 +612,12 @@ app.post('/api/login', (req: Request, res: Response) => {
     deviceTokens.set(deviceId, deviceToken);
   }
 
+  // 头像恢复：内存用户表重启会清空 avatarUrl，但磁盘头像文件仍在，则自动补回
+  if (!user.avatarUrl) {
+    const candidate = path.join(AVATAR_DIR, `${user.id}.jpg`);
+    if (fs.existsSync(candidate)) user.avatarUrl = `/avatars/${user.id}.jpg`;
+  }
+
   const jwtToken = generateJwt({ userId: user.id, deviceId });
 
   res.json({
@@ -616,7 +628,8 @@ app.post('/api/login', (req: Request, res: Response) => {
     userProfile: {
       id: user.id,
       displayName: user.displayName,
-      publicKey: user.publicKey
+      publicKey: user.publicKey,
+      avatarUrl: user.avatarUrl
     }
   } as LoginResponse);
 });
@@ -634,7 +647,8 @@ app.get('/api/users/:userId/public-key', (req: Request, res: Response) => {
   res.json({
     userId: user.id,
     displayName: user.displayName,
-    publicKeyPem: user.publicKey
+    publicKeyPem: user.publicKey,
+    avatarUrl: user.avatarUrl
   });
 });
 
@@ -826,6 +840,7 @@ app.get('/api/contacts', (req: Request, res: Response) => {
     id: u!.id,
     displayName: u!.displayName,
     publicKey: u!.publicKey,
+    avatarUrl: u!.avatarUrl,
     online: !!Array.from(connectedClients.keys()).find(k => k.startsWith(`${u!.id}:`))
   })));
 });
@@ -971,6 +986,58 @@ app.post('/api/users/me/display-name', (req: Request, res: Response) => {
   console.log(`[API] display-name updated: ${user.id} -> ${user.displayName}`);
   scheduleSave();
   res.json({ success: true, userId: user.id, displayName: user.displayName });
+});
+
+// ── 上传头像（base64 JSON，服务端转存为 /avatars/<userId>.jpg）──
+app.post('/api/users/me/avatar', (req: Request, res: Response) => {
+  const authHeader = (req.headers['authorization'] as string) || '';
+  const token = authHeader.replace(/^Bearer\s+/i, '');
+  const decoded = decodeJwt(token);
+  if (!decoded || !decoded.userId) {
+    res.status(401).json({ success: false, error: '未授权' });
+    return;
+  }
+
+  const body = req.body as Record<string, any>;
+  const avatarBase64 = typeof body?.avatar === 'string' ? body.avatar : '';
+  const mime = typeof body?.mime === 'string' ? body.mime : 'image/jpeg';
+  if (!avatarBase64) {
+    res.status(400).json({ success: false, error: '缺少头像数据' });
+    return;
+  }
+  if (!/^image\//.test(mime)) {
+    res.status(400).json({ success: false, error: '仅支持图片格式' });
+    return;
+  }
+
+  let buf: Buffer;
+  try {
+    buf = Buffer.from(avatarBase64, 'base64');
+  } catch (_) {
+    res.status(400).json({ success: false, error: '头像数据无效' });
+    return;
+  }
+  if (buf.length > 2 * 1024 * 1024) {
+    res.status(413).json({ success: false, error: '头像过大（解码后 ≤ 2MB）' });
+    return;
+  }
+
+  const user = getUserById(decoded.userId);
+  if (!user) {
+    res.status(404).json({ success: false, error: '用户不存在' });
+    return;
+  }
+
+  try {
+    const filePath = path.join(AVATAR_DIR, `${user.id}.jpg`);
+    fs.writeFileSync(filePath, buf);
+    user.avatarUrl = `/avatars/${user.id}.jpg`;
+    console.log(`[AVATAR] updated: ${user.id} -> ${user.avatarUrl} (${buf.length} bytes)`);
+    scheduleSave();
+    res.json({ success: true, userId: user.id, avatarUrl: user.avatarUrl });
+  } catch (_) {
+    res.status(500).json({ success: false, error: '头像保存失败' });
+  }
 });
 
 // ── 退出登录（使当前 deviceToken 失效，可选）──
@@ -1351,7 +1418,8 @@ app.get('/admin/api/users', requireAdmin, (_req: Request, res: Response) => {
     createdAt: u.createdAt || 0,
     online: isOnline(u.id),
     friendCount: friendships.get(u.id)?.size || 0,
-    hasKey: !!u.publicKey
+    hasKey: !!u.publicKey,
+    avatarUrl: u.avatarUrl
   }));
   res.json({ success: true, users });
 });

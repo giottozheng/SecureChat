@@ -33,9 +33,12 @@ class ConversationViewModel @Inject constructor(
     val uiState: StateFlow<ConversationListUiState> = _uiState.asStateFlow()
     
     init {
-        // 拉取团队成员最新昵称，使「修改昵称」在会话列表即时生效
-        viewModelScope.launch { accountRepository.fetchAndCacheContacts() }
-        loadConversations()
+        // 先拉取好友最新资料（昵称 + 头像），再加载会话列表，
+        // 保证会话列表的头像 / 昵称在好友数据到位后刷新
+        viewModelScope.launch {
+            accountRepository.fetchAndCacheContacts()
+            loadConversations()
+        }
     }
     
     private fun loadConversations() {

@@ -23,15 +23,22 @@ import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
 import android.util.Log
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.TimeUnit
 import com.securechat.app.BuildConfig
 import com.securechat.app.update.UpdateInfo
 import com.securechat.app.update.UpdateManager
 import com.securechat.app.util.ServerConfig
 import com.securechat.app.network.push.PushConnectionService
+import com.securechat.app.ui.components.AvatarBox
 
 /**
  * 设置与安全中心
@@ -41,6 +48,9 @@ import com.securechat.app.network.push.PushConnectionService
 @Composable
 fun SettingsScreen(
     displayName: String = "",
+    avatarUrl: String = "",
+    isAvatarUploading: Boolean = false,
+    onAvatarChange: (ByteArray) -> Unit = { _ -> },
     onChangeNickname: (String) -> Unit = { _ -> },
     onChangePassword: (String, String) -> Unit = { _, _ -> },
     onClearCache: () -> Unit = {},
@@ -70,6 +80,25 @@ fun SettingsScreen(
     // ── OTA 升级状态 ──
     val scope = rememberCoroutineScope()
     var updateUiState by remember { mutableStateOf<OtaUiState>(OtaUiState.Idle) }
+
+    // ── 头像选择（从相册取图 → 压缩为 JPEG → 回调上传）──
+    val avatarLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        uri ?: return@rememberLauncherForActivityResult
+        scope.launch(Dispatchers.IO) {
+            val bytes = compressAvatarToJpeg(context, uri)
+            if (bytes == null) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "无法读取所选图片", Toast.LENGTH_SHORT).show()
+                }
+                return@launch
+            }
+            withContext(Dispatchers.Main) {
+                onAvatarChange(bytes)
+            }
+        }
+    }
 
     fun checkForUpdate() {
         scope.launch {
@@ -235,6 +264,40 @@ fun SettingsScreen(
         ) {
             // ── 个人资料 ──
             Text("个人资料", style = MaterialTheme.typography.labelMedium)
+
+            // ── 头像 ──
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Box(modifier = Modifier.size(80.dp)) {
+                    AvatarBox(
+                        avatarUrl = avatarUrl.ifBlank { null }?.let { ServerConfig.getBaseUrl(context) + it },
+                        displayName = displayName.ifBlank { "我" },
+                        size = 80.dp,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clickable(enabled = !isAvatarUploading) { avatarLauncher.launch("image/*") }
+                    )
+                    if (isAvatarUploading) {
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(36.dp), strokeWidth = 3.dp)
+                        }
+                    }
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("头像", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        if (isAvatarUploading) "上传中…" else "点击头像更换（建议使用正方形图片）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
 
             ListItem(
                 headlineContent = { Text("昵称") },
@@ -595,5 +658,43 @@ private fun EncryptedRow(label: String, value: String) {
         Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f))
         Spacer(Modifier.width(8.dp))
         Text(value, style = MaterialTheme.typography.bodyMedium)
+    }
+}
+
+/**
+ * 将选中的图片 URI 解码、按比例缩放（最长边不超过 maxDim）并压缩为 JPEG 字节数组。
+ * 在 IO 线程调用；返回 null 表示读取失败。
+ */
+private fun compressAvatarToJpeg(
+    context: Context,
+    uri: Uri,
+    maxDim: Int = 512,
+    quality: Int = 82
+): ByteArray? {
+    return try {
+        val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        context.contentResolver.openInputStream(uri)?.use {
+            BitmapFactory.decodeStream(it, null, boundsOpts)
+        }
+        val (w, h) = boundsOpts.outWidth to boundsOpts.outHeight
+        val inSample = if (w > 0 && h > 0) {
+            (maxOf(w, h).toFloat() / maxDim).coerceAtLeast(1f).toInt().coerceAtLeast(1)
+        } else 1
+        val decodeOpts = BitmapFactory.Options().apply { inSampleSize = inSample }
+        val bmp = context.contentResolver.openInputStream(uri)?.use {
+            BitmapFactory.decodeStream(it, null, decodeOpts)
+        } ?: return null
+        val scaled = if (maxOf(bmp.width, bmp.height) > maxDim) {
+            val ratio = maxDim.toFloat() / maxOf(bmp.width, bmp.height)
+            Bitmap.createScaledBitmap(bmp, (bmp.width * ratio).toInt(), (bmp.height * ratio).toInt(), true)
+        } else bmp
+        val out = ByteArrayOutputStream()
+        scaled.compress(Bitmap.CompressFormat.JPEG, quality, out)
+        if (scaled != bmp) scaled.recycle()
+        bmp.recycle()
+        out.toByteArray()
+    } catch (e: Exception) {
+        Log.e("SettingsScreen", "compressAvatar failed", e)
+        null
     }
 }

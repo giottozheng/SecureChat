@@ -26,7 +26,10 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.securechat.app.data.local.FriendEntity
+import com.securechat.app.ui.components.AvatarBox
+import com.securechat.app.util.ServerConfig
 import com.securechat.app.viewmodel.ContactsViewModel
+import androidx.compose.ui.platform.LocalContext
 
 /**
  * 联系人界面 — 仅显示「已互为好友」的成员。
@@ -283,7 +286,10 @@ private fun FriendCard(
                 .padding(16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            AvatarBox(null, friend.displayName)
+            AvatarBox(
+                avatarUrl = friend.avatarUrl?.let { ServerConfig.getBaseUrl(LocalContext.current) + it },
+                displayName = friend.displayName
+            )
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -306,22 +312,7 @@ private fun FriendCard(
     }
 }
 
-@Composable
-private fun AvatarBox(resId: Int?, displayName: String) {
-    val label = displayName.firstOrNull()?.toString() ?: "?"
-    Box(
-        modifier = Modifier
-            .size(48.dp)
-            .background(MaterialTheme.colorScheme.primary, shape = MaterialTheme.shapes.medium)
-    ) {
-        Text(
-            label,
-            color = MaterialTheme.colorScheme.onPrimary,
-            style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.align(Alignment.Center)
-        )
-    }
-}
+// 头像统一使用公共组件 com.securechat.app.ui.components.AvatarBox
 
 @Composable
 private fun OnlineDot(isOnline: Boolean) {

@@ -18,6 +18,8 @@ import javax.inject.Inject
  */
 data class SettingsUiState(
     val displayName: String = "",
+    val avatarUrl: String = "",
+    val isAvatarUploading: Boolean = false,
     val message: String? = null
 )
 
@@ -31,7 +33,8 @@ class SettingsViewModel @Inject constructor(
 
     private val _uiState = MutableStateFlow(
         SettingsUiState(
-            displayName = prefs.getString("auth_display_name", "") ?: ""
+            displayName = prefs.getString("auth_display_name", "") ?: "",
+            avatarUrl = prefs.getString("auth_avatar_url", "") ?: ""
         )
     )
     val uiState: StateFlow<SettingsUiState> = _uiState
@@ -67,5 +70,23 @@ class SettingsViewModel @Inject constructor(
 
     fun clearMessage() {
         _uiState.update { it.copy(message = null) }
+    }
+
+    /**
+     * 上传头像：imageBytes 为已压缩的 JPEG 字节（由 UI 层完成图片缩放/压缩）。
+     * 成功后将服务端返回的头像 URL 写入 uiState 与本地 prefs，供各处展示。
+     */
+    fun uploadAvatar(imageBytes: ByteArray) {
+        _uiState.update { it.copy(isAvatarUploading = true) }
+        viewModelScope.launch {
+            accountRepository.uploadAvatar(imageBytes)
+                .onSuccess { url ->
+                    _uiState.update { it.copy(avatarUrl = url, message = "头像已更新", isAvatarUploading = false) }
+                    prefs.edit().putString("auth_avatar_url", url).apply()
+                }
+                .onFailure { e ->
+                    _uiState.update { it.copy(message = "头像上传失败: ${e.message}", isAvatarUploading = false) }
+                }
+        }
     }
 }

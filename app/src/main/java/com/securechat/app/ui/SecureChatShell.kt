@@ -301,6 +301,9 @@ fun NavGraphBuilder.tabContainer(
 
         SettingsScreen(
             displayName = settingsState.displayName,
+            avatarUrl = settingsState.avatarUrl,
+            isAvatarUploading = settingsState.isAvatarUploading,
+            onAvatarChange = { settingsVm.uploadAvatar(it) },
             userId = currentUserId,
             onChangeNickname = { settingsVm.updateNickname(it) },
             onChangePassword = { old, new -> settingsVm.changePassword(old, new) },

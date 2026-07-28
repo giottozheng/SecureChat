@@ -4,7 +4,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.*
@@ -15,6 +14,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import android.content.Context
 import com.securechat.app.data.model.Conversation
+import com.securechat.app.ui.components.AvatarBox
+import com.securechat.app.util.ServerConfig
+import com.securechat.app.util.getCachedAvatarUrl
 import com.securechat.app.util.teamDisplayName
 
 /**
@@ -118,21 +120,12 @@ fun ConversationListItem(
                 .fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Avatar placeholder
-            Surface(
-                modifier = Modifier.size(48.dp),
-                shape = CircleShape,
-                color = MaterialTheme.colorScheme.primaryContainer
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Text(
-                        resolvedName.firstOrNull()?.uppercaseChar()?.toString()
-                            ?: "?",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
-                    )
-                }
-            }
+            // 头像（优先好友头像，无则首字母占位）
+            AvatarBox(
+                avatarUrl = getCachedAvatarUrl(other)?.let { ServerConfig.getBaseUrl(LocalContext.current) + it },
+                displayName = resolvedName,
+                size = 48.dp
+            )
             
             Spacer(modifier = Modifier.width(12.dp))
             

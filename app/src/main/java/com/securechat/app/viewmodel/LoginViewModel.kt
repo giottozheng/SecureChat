@@ -106,8 +106,10 @@ class LoginViewModel @Inject constructor(
                     val o = JSONObject(body)
                     val token = o.getString("token")
                     val userId = o.getString("userId")
-                    val displayName = o.optJSONObject("userProfile")?.optString("displayName") ?: username
-                    AuthResult(token, userId, displayName)
+                    val profile = o.optJSONObject("userProfile")
+                    val displayName = profile?.optString("displayName") ?: username
+                    val avatarUrl = profile?.optString("avatarUrl") ?: ""
+                    AuthResult(token, userId, displayName, avatarUrl)
                 }
             }
             if (result.isSuccess) {
@@ -150,8 +152,10 @@ class LoginViewModel @Inject constructor(
                     val o = JSONObject(body)
                     val token = o.getString("token")
                     val userId = o.getString("userId")
-                    val name = o.optJSONObject("userProfile")?.optString("displayName") ?: displayName
-                    AuthResult(token, userId, name)
+                    val profile = o.optJSONObject("userProfile")
+                    val name = profile?.optString("displayName") ?: displayName
+                    val avatarUrl = profile?.optString("avatarUrl") ?: ""
+                    AuthResult(token, userId, name, avatarUrl)
                 }
             }
             if (result.isSuccess) {
@@ -171,6 +175,7 @@ class LoginViewModel @Inject constructor(
             putString("auth_token", auth.token)
             putString("auth_user_id", auth.userId)
             putString("auth_display_name", auth.displayName)
+            putString("auth_avatar_url", auth.avatarUrl)
             // device_id 已在 getDeviceId() 中写入
             apply()
         }
@@ -266,6 +271,7 @@ class LoginViewModel @Inject constructor(
     private data class AuthResult(
         val token: String,
         val userId: String,
-        val displayName: String
+        val displayName: String,
+        val avatarUrl: String = ""
     )
 }

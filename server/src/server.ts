@@ -34,6 +34,7 @@ interface ExtWebSocket extends WebSocket {
 interface ClientConnection {
   userId: string;
   deviceId: string;
+  deviceType: 'mobile' | 'desktop';
   ws: ExtWebSocket;
   connectedAt: Date;
   lastPingAt: Date;
@@ -65,6 +66,16 @@ interface User {
   avatarUrl?: string;     // 头像 URL（/avatars/<id>.jpg，明文公开，非聊天内容）
   enabled?: boolean;     // 账号是否启用（后台可禁用）
   createdAt?: number;    // 注册时间（毫秒）
+  // 多设备：每个设备持有独立 RSA 密钥；移动端继续用顶层 publicKey 保兼容（v1 客户端只读这个）
+  devices?: { [deviceId: string]: DeviceInfo };
+}
+
+// 单个设备（移动端/桌面端）的密钥与状态；pubKey 为公钥（可公开分发），私钥永不离开本机
+interface DeviceInfo {
+  type: 'mobile' | 'desktop';
+  pubKey: string;
+  keyEpoch: number;
+  lastSeen: number;
 }
 
 interface LoginResponse {
@@ -96,6 +107,61 @@ const friendRequests: Map<string, Array<{ fromId: string; fromName: string; time
 
 // 服务端消息留存（用于 1 天保留策略）：messageStore[conversationId] = 消息列表
 const messageStore: Map<string, OfflineMessage[]> = new Map();
+
+// 桌面端配对会话：code -> 会话信息（桌面公钥暂存，待手机端确认）
+const pairingSessions: Map<string, {
+  code: string;
+  deviceId: string;
+  publicKey: string;
+  displayName?: string;
+  userId?: string;     // 手机端确认后回填
+  expiresAt: number;
+}> = new Map();
+
+// ── 多设备信封工具（服务端只搬密文，绝不接触明文/私钥）──
+// v2 信封格式：v2:<count>:<d1>:<w1>:...:<dn>:<wn>:<senderDev>:<wSelf>:<iv>:<ct>
+//   d* = 收件人设备标识（移动端固定用保留标识 'm'，桌面端用各自 deviceId）
+//   w* = 用该设备公钥包装的会话密钥；iv/ct 为 AES-GCM 的 IV 与密文
+//   senderDev = 发送方设备标识；wSelf = 用发送方自身公钥包装的会话密钥（发送方自读用）
+// 服务端按目标设备标识抽出自已的 wrap，重组为移动端兼容的 5 段 v1 包下发：
+//   v1:<wTarget>:<wSelf>:<iv>:<ct>
+// 这与移动端 MessageEncryptor 的 v1 格式（v1:<wrapR>:<wrapS>:<iv>:<ct>）字节一致：
+// 移动端 decryptMessage 按 split(":", limit=5) 取 5 段并用 unwrapEither(wrapR, wrapS) 解密，
+// 故第 1 段必须是目标设备的 wrap、第 2 段必须是发送方 wrap，缺一段会导致移动端判定格式非法而解密失败。
+// 移动端（v1 客户端）用保留标识 'm' 取回自己的 wrap；桌面端用自己的 deviceId 取回。
+function reassembleForDevice(envelope: string, targetDeviceId: string, _mobilePublicKey: string): string | null {
+  if (!envelope.startsWith('v2:')) return envelope; // v1 原样透传
+  try {
+    const parts = envelope.split(':');
+    const count = parseInt(parts[1], 10);
+    if (!Number.isFinite(count) || count < 0) return null;
+    let idx = 2;
+    const wraps: { [d: string]: string } = {};
+    for (let i = 0; i < count; i++) {
+      const d = parts[idx++];
+      const w = parts[idx++];
+      if (d === undefined || w === undefined) return null;
+      wraps[d] = w;
+    }
+    const senderDev = parts[idx++];
+    const wSelf = parts[idx++];
+    const iv = parts[idx++];
+    const ct = parts[idx++];
+    if (iv === undefined || ct === undefined) return null;
+    const wrap = wraps[targetDeviceId];
+    if (!wrap) return null; // 该设备不在收件人列表
+    // 重组为移动端兼容的 5 段 v1：v1:<wTarget>:<wSelf>:<iv>:<ct>
+    // （wSelf 保留发送方自身 wrap，使移动端 unwrapEither 始终能命中一段合法 wrap）
+    return `v1:${wrap}:${wSelf}:${iv}:${ct}`;
+  } catch {
+    return null;
+  }
+}
+
+// 在线连接 → 该连接对应的信封设备标识（移动端用 'm'，桌面端用真实 deviceId）
+function deliveryDeviceTag(client: ClientConnection): string {
+  return client.deviceType === 'mobile' ? 'm' : client.deviceId;
+}
 
 // 消息留存时长改为可配置（见管理后台 → 消息保留）
 function getRetentionMs(): number {
@@ -572,7 +638,7 @@ app.post('/api/register', (req: Request, res: Response) => {
   console.log(`[REGISTER] New user: ${username} -> ${id}`);
   scheduleSave();
 
-  const jwtToken = generateJwt({ userId: id, deviceId: deviceId || 'reg' });
+  const jwtToken = generateJwt({ userId: id, deviceId: deviceId || 'reg', deviceType: 'mobile' });
   res.json({
     success: true,
     token: jwtToken,
@@ -619,7 +685,7 @@ app.post('/api/login', (req: Request, res: Response) => {
     if (fs.existsSync(candidate)) user.avatarUrl = `/avatars/${user.id}.jpg`;
   }
 
-  const jwtToken = generateJwt({ userId: user.id, deviceId });
+  const jwtToken = generateJwt({ userId: user.id, deviceId, deviceType: 'mobile' });
 
   res.json({
     success: true,
@@ -654,6 +720,39 @@ app.get('/api/users/:userId/public-key', (req: Request, res: Response) => {
   });
 });
 
+// ── 获取收件人全部设备公钥（供发送方产出 v2 多 wrap 信封）──
+// 1.0.77+ 移动端发送前调用：拿到对方的移动端顶层公钥（tag 'm'）与各桌面设备公钥（tag = deviceId），
+// 逐设备用对方公钥包裹会话密钥，再上传 v2 信封；服务端按目标设备重组成 v1 下发。
+app.get('/api/users/:userId/devices', (req: Request, res: Response) => {
+  const decoded = decodeJwt((req.headers['authorization'] || '').replace(/^Bearer\s+/i, ''));
+  if (!decoded || !decoded.userId) {
+    res.status(401).json({ success: false, error: '未授权' });
+    return;
+  }
+  const { userId } = req.params;
+  const user = getUserById(userId);
+  if (!user) {
+    res.status(404).json({ success: false, error: '用户不存在' });
+    return;
+  }
+  const devices = user.devices
+    ? Object.entries(user.devices).map(([deviceId, d]) => ({
+        deviceId,
+        type: d.type,
+        pubKey: d.pubKey,
+        keyEpoch: d.keyEpoch || 0,
+        online: !!Array.from(connectedClients.values()).find(c => c.userId === userId && c.deviceId === deviceId)
+      }))
+    : [];
+  // 移动端顶层公钥始终作为保留标识 'm' 返回（v1 客户端只读这个）
+  res.json({
+    userId: user.id,
+    mobilePubKey: user.publicKey,
+    mobileKeyEpoch: user.keyEpoch || 0,
+    devices
+  });
+});
+
 // ── 注册真实 RSA 公钥（客户端登录时上传，供其他成员加密）──
 app.post('/api/keys/register', (req: Request, res: Response) => {
   const token = (req.headers['authorization'] || '').replace(/^Bearer\s+/i, '');
@@ -680,29 +779,142 @@ app.post('/api/keys/register', (req: Request, res: Response) => {
   res.json({ success: true, userId: user.id, registered: true, keyEpoch: user.keyEpoch });
 });
 
+// ── 桌面端配对登录（需手机端确认）──
+// 流程：桌面 POST /api/pairing/request（带自身 deviceId+公钥）→ 拿到 6 位短码
+//      → 手机端在 App 内看到待确认项并 POST /api/pairing/approve
+//      → 服务端注册桌面设备并签发桌面 token；桌面轮询 /api/pairing/status 拿到 token
+
+// 1) 桌面端发起配对
+app.post('/api/pairing/request', (req: Request, res: Response) => {
+  const { deviceId, publicKey, displayName } = req.body as Record<string, any>;
+  if (!deviceId || !publicKey) {
+    res.status(400).json({ success: false, error: '缺少 deviceId 或 publicKey' });
+    return;
+  }
+  const code = String(Math.floor(100000 + Math.random() * 900000));
+  const expiresAt = Date.now() + 5 * 60 * 1000; // 5 分钟有效
+  pairingSessions.set(code, {
+    code,
+    deviceId,
+    publicKey,
+    displayName: typeof displayName === 'string' && displayName.trim() ? displayName.trim() : '桌面端',
+    expiresAt
+  });
+  console.log(`[PAIRING] request ${code} from device ${deviceId}`);
+  res.json({ success: true, code, expiresIn: 300 });
+});
+
+// 2) 手机端查询待确认配对（当前登录用户视角）
+app.get('/api/pairing/pending', (req: Request, res: Response) => {
+  const decoded = decodeJwt((req.headers['authorization'] || '').replace(/^Bearer\s+/i, ''));
+  if (!decoded || !decoded.userId) {
+    res.status(401).json({ success: false, error: '未授权' });
+    return;
+  }
+  const list = Array.from(pairingSessions.values())
+    .filter(p => !p.userId || p.userId === decoded.userId)
+    .filter(p => p.expiresAt > Date.now())
+    .map(p => ({ code: p.code, deviceId: p.deviceId, displayName: p.displayName, expiresAt: p.expiresAt }));
+  res.json({ success: true, pending: list });
+});
+
+// 3) 手机端确认：注册桌面设备并签发桌面 token
+app.post('/api/pairing/approve', (req: Request, res: Response) => {
+  const decoded = decodeJwt((req.headers['authorization'] || '').replace(/^Bearer\s+/i, ''));
+  if (!decoded || !decoded.userId) {
+    res.status(401).json({ success: false, error: '未授权' });
+    return;
+  }
+  const { code } = req.body as Record<string, any>;
+  const session = code ? pairingSessions.get(code) : null;
+  if (!session || session.expiresAt <= Date.now()) {
+    res.status(404).json({ success: false, error: '配对码无效或已过期' });
+    return;
+  }
+  const user = getUserById(decoded.userId);
+  if (!user) {
+    res.status(404).json({ success: false, error: '用户不存在' });
+    return;
+  }
+  // 注册桌面设备（不覆盖移动端顶层 publicKey）
+  if (!user.devices) user.devices = {};
+  user.devices[session.deviceId] = {
+    type: 'desktop',
+    pubKey: session.publicKey,
+    keyEpoch: (user.keyEpoch || 0) + 1,
+    lastSeen: Date.now()
+  };
+  session.userId = user.id;
+  scheduleSave();
+  console.log(`[PAIRING] approved ${code} -> desktop device ${session.deviceId}`);
+  // 手机端只是发起确认，桌面 token 由桌面端轮询 /api/pairing/status 获取
+  res.json({ success: true, deviceId: session.deviceId });
+});
+
+// 4) 桌面端轮询配对状态（确认后一次性返回 token 并清除会话）
+app.get('/api/pairing/status', (req: Request, res: Response) => {
+  const code = (req.query.code as string) || '';
+  const session = pairingSessions.get(code);
+  if (!session) {
+    res.json({ success: true, status: 'not_found' });
+    return;
+  }
+  if (session.expiresAt <= Date.now()) {
+    pairingSessions.delete(code);
+    res.json({ success: true, status: 'expired' });
+    return;
+  }
+  if (session.userId) {
+    const user = getUserById(session.userId);
+    const jwtToken = generateJwt({ userId: session.userId, deviceId: session.deviceId, deviceType: 'desktop' });
+    let dt = deviceTokens.get(session.deviceId);
+    if (!dt) { dt = generateDeviceToken(session.deviceId, session.userId); deviceTokens.set(session.deviceId, dt); }
+    pairingSessions.delete(code);
+    res.json({
+      success: true,
+      status: 'approved',
+      token: jwtToken,
+      userId: session.userId,
+      deviceToken: dt,
+      deviceId: session.deviceId,
+      userProfile: user ? { id: user.id, displayName: user.displayName, publicKey: user.publicKey, avatarUrl: user.avatarUrl } : undefined
+    });
+  } else {
+    res.json({ success: true, status: 'pending' });
+  }
+});
+
 // ── 消息轮询 ──
 
 app.post('/api/messages/poll', (req: Request, res: Response) => {
-  const { userId, since } = req.body as Record<string, any>;
+  const { userId, since, deviceId, deviceType } = req.body as Record<string, any>;
   if (!userId) {
     res.status(400).json({ success: false, error: '缺少 userId' });
     return;
   }
+  // 多设备：桌面端带 deviceId+deviceType 时，为其重组 v1 包；移动端（v1）默认 'm' 标签
+  const tag = deviceType === 'desktop' && deviceId ? deviceId : 'm';
+  const recipientUser = getUserById(userId);
+  const mobilePub = recipientUser?.publicKey || '';
+  const wantsReassembly = deviceType === 'desktop' && deviceId;
 
   const messages = (offlineMessages.get(userId) || [])
     .filter(m => !since || m.timestamp >= since)
     .sort((a, b) => a.timestamp - b.timestamp);
 
-  if (messages.length > 0) {
-    messages.forEach(m => {
-      const list = offlineMessages.get(userId) || [];
-      const idx = list.indexOf(m);
-      if (idx >= 0) list.splice(idx, 1);
+  let out = messages;
+  if (wantsReassembly) {
+    out = messages.map(m => {
+      const re = reassembleForDevice(m.encryptedPayload, tag, mobilePub);
+      return re ? { ...m, encryptedPayload: re } : m;
     });
-    offlineMessages.set(userId, messages.length > 0 ? messages : []);
   }
 
-  res.json({ success: true, messages });
+  if (messages.length > 0) {
+    offlineMessages.set(userId, []);
+  }
+
+  res.json({ success: true, messages: out });
 });
 
 // ── 发送消息 ──
@@ -746,29 +958,35 @@ app.post('/api/messages/send', (req: Request, res: Response) => {
   storeArr.push(message);
   messageStore.set(message.conversationId, storeArr);
 
-  // 检查接收者是否在线
-  const recipientKey = Array.from(connectedClients.keys()).find(
-    k => k.startsWith(`${recipientId}:`)
+  // 多设备广播：把消息下发给接收者所有在线设备，并按设备重组 v1 包
+  const recipientUser = getUserById(recipientId);
+  const recipientMobilePub = recipientUser?.publicKey || '';
+  const onlineTargets = Array.from(connectedClients.values()).filter(
+    c => c.userId === recipientId && c.ws.readyState === 1 /* OPEN */
   );
-  const recipient = recipientKey ? connectedClients.get(recipientKey)! : null;
 
-  if (recipient && recipient.ws.readyState === 1 /* OPEN */) {
-    recipient.ws.send(JSON.stringify({
-      type: 'message',
-      data: {
-        id: message.id,
-        senderId: message.senderId,
-        senderName: message.senderName,
-        conversationId: message.conversationId,
-        encryptedContent: message.encryptedPayload,
-        messageType: message.messageType || 'TEXT',
-        timestamp: message.timestamp,
-        fileId: message.fileId,
-        fileName: message.fileName,
-        fileMime: message.fileMime,
-        fileSize: message.fileSize
-      }
-    }));
+  if (onlineTargets.length > 0) {
+    onlineTargets.forEach(client => {
+      const tag = deliveryDeviceTag(client);
+      const payload = reassembleForDevice(message.encryptedPayload, tag, recipientMobilePub);
+      if (!payload) return; // 该设备无对应 wrap（理论不会发生）
+      client.ws.send(JSON.stringify({
+        type: 'message',
+        data: {
+          id: message.id,
+          senderId: message.senderId,
+          senderName: message.senderName,
+          conversationId: message.conversationId,
+          encryptedContent: payload,
+          messageType: message.messageType || 'TEXT',
+          timestamp: message.timestamp,
+          fileId: message.fileId,
+          fileName: message.fileName,
+          fileMime: message.fileMime,
+          fileSize: message.fileSize
+        }
+      }));
+    });
   } else {
     const list = offlineMessages.get(recipientId) || [];
     list.push(message);
@@ -776,6 +994,54 @@ app.post('/api/messages/send', (req: Request, res: Response) => {
   }
 
   res.json({ success: true, messageId: message.id });
+});
+
+// ── 历史消息拉取（配对/重装后补齐历史）──
+// 按「规范化会话 ID」（收发双方 userId 字典序排序）从 messageStore 取消息，
+// 并据此连接的设备标识（移动端 'm' / 桌面端 deviceId）逐条重组成可解密信封下发。
+app.get('/api/messages/history', (req: Request, res: Response) => {
+  const decoded = decodeJwt((req.headers['authorization'] || '').replace(/^Bearer\s+/i, ''));
+  if (!decoded || !decoded.userId) {
+    res.status(401).json({ success: false, error: '未授权' });
+    return;
+  }
+  const myId = decoded.userId;
+  const peer = (req.query.peer as string) || '';
+  if (!peer) {
+    res.status(400).json({ success: false, error: '缺少 peer 参数' });
+    return;
+  }
+  // 规范化会话 ID（与客户端 canonical_conv 保持一致：两端按字典序排序）
+  const convId = [myId, peer].sort().join('_');
+  const tag = decoded.deviceType === 'desktop' && decoded.deviceId ? decoded.deviceId : 'm';
+  const selfUser = getUserById(myId);
+  const selfMobilePub = selfUser?.publicKey || '';
+
+  const stored = messageStore.get(convId) || [];
+  const limit = Math.min(500, Math.max(1, parseInt(req.query.limit as string || '200', 10)));
+  const sliced = stored
+    .slice()
+    .sort((a, b) => a.timestamp - b.timestamp)
+    .slice(-limit);
+
+  const out = sliced.map(m => {
+    const payload = reassembleForDevice(m.encryptedPayload, tag, selfMobilePub);
+    return {
+      id: m.id,
+      senderId: m.senderId,
+      senderName: m.senderName,
+      conversationId: m.conversationId,
+      encryptedContent: payload || m.encryptedPayload,
+      messageType: m.messageType || 'TEXT',
+      timestamp: m.timestamp,
+      fileId: m.fileId,
+      fileName: m.fileName,
+      fileMime: m.fileMime,
+      fileSize: m.fileSize
+    };
+  });
+
+  res.json({ success: true, conversationId: convId, messages: out });
 });
 
 // ── 文件（端到端加密密文）上传 / 下载 ──
@@ -791,8 +1057,13 @@ app.post('/api/files/upload', express.text({ type: '*/*', limit: '200mb' }), (re
     res.status(401).json({ success: false, error: '未授权' });
     return;
   }
-  const content = typeof req.body === 'string' ? req.body : '';
-  if (!content || !content.startsWith('v1:')) {
+  const content = typeof req.body === 'string' ? req.body.trim() : '';
+  // 接受三种密文形态：
+  //   v1:<...>  —— 单设备信封（移动端 / 旧客户端）
+  //   v2:<...>  —— 多设备信封（桌面端 / 1.0.77+ 移动端）
+  //   原始密文   —— 统一媒体设计下，文件字节直接用「消息会话密钥」AES-GCM 加密后的 Base64（无信封前缀）
+  // 服务端只落盘密文、绝不接触明文/私钥，故不校验内部结构，仅做最小长度防护。
+  if (!content || content.length < 16) {
     res.status(400).json({ success: false, error: '无效的文件密文' });
     return;
   }
@@ -845,7 +1116,15 @@ app.get('/api/contacts', (req: Request, res: Response) => {
     publicKey: u!.publicKey,
     keyEpoch: u!.keyEpoch || 0,
     avatarUrl: u!.avatarUrl,
-    online: !!Array.from(connectedClients.keys()).find(k => k.startsWith(`${u!.id}:`))
+    online: !!Array.from(connectedClients.keys()).find(k => k.startsWith(`${u!.id}:`)),
+    // 多设备：每个好友的设备公钥与上线状态（移动端忽略此字段，桌面端用它构建 v2 信封）
+    devices: u!.devices ? Object.entries(u!.devices).map(([deviceId, d]) => ({
+      deviceId,
+      type: d.type,
+      pubKey: d.pubKey,
+      keyEpoch: d.keyEpoch || 0,
+      online: !!Array.from(connectedClients.values()).find(c => c.userId === u!.id && c.deviceId === deviceId)
+    })) : []
   })));
 });
 
@@ -1051,8 +1330,11 @@ app.post('/api/logout', (req: Request, res: Response) => {
     res.status(401).json({ success: false, error: '未授权' });
     return;
   }
-  // 移除在线连接（若有）
-  const key = Array.from(connectedClients.keys()).find(k => k.startsWith(`${decoded.userId}:`));
+  // 移除在线连接（仅同设备类型）
+  const key = Array.from(connectedClients.keys()).find(k => {
+    const c = connectedClients.get(k);
+    return c && c.userId === decoded.userId && c.deviceType === (decoded.deviceType || 'mobile');
+  });
   if (key) {
     connectedClients.get(key)?.ws.close(4000, 'Logged out');
     connectedClients.delete(key);
@@ -1078,24 +1360,28 @@ wss.on('connection', (ws: ExtWebSocket, req: http.IncomingMessage) => {
     return;
   }
 
-  const { userId, deviceId } = decoded;
+  const { userId, deviceId, deviceType } = decoded;
+  const dType: 'mobile' | 'desktop' = deviceType === 'desktop' ? 'desktop' : 'mobile';
   const clientKey = `${userId}:${deviceId}`;
   ws.clientUserId = userId;
   ws.clientDeviceId = deviceId;
 
-  // 踢掉旧连接
-  const existingKey = Array.from(connectedClients.keys()).find(
-    k => k.startsWith(`${userId}:`)
-  );
+  // 单终端/类型约束：仅踢掉同账号、同设备类型的旧连接
+  // （移动端第二台登录踢第一台；桌面端同理；移动+桌面可并存）
+  const existingKey = Array.from(connectedClients.keys()).find(k => {
+    const c = connectedClients.get(k);
+    return c && c.userId === userId && c.deviceType === dType;
+  });
   if (existingKey) {
     const existing = connectedClients.get(existingKey)!;
-    existing.ws.close(4002, 'New device connected');
+    existing.ws.close(4002, 'New device of same type connected');
     connectedClients.delete(existingKey);
   }
 
   const client: ClientConnection = {
     userId,
     deviceId,
+    deviceType: dType,
     ws,
     connectedAt: new Date(),
     lastPingAt: new Date()
@@ -1109,12 +1395,19 @@ wss.on('connection', (ws: ExtWebSocket, req: http.IncomingMessage) => {
     data: { userId, message: '连接成功' }
   }));
 
-  // 推送离线消息
+  // 推送离线消息（按本设备重组 v1 包）
   const pendingMessages = offlineMessages.get(userId) || [];
   if (pendingMessages.length > 0) {
+    const tag = deliveryDeviceTag(client);
+    const selfUser = getUserById(userId);
+    const selfMobilePub = selfUser?.publicKey || '';
+    const reassembled = pendingMessages.map(m => {
+      const re = reassembleForDevice(m.encryptedPayload, tag, selfMobilePub);
+      return re ? { ...m, encryptedPayload: re } : m;
+    });
     ws.send(JSON.stringify({
       type: 'offline_sync',
-      data: { messages: pendingMessages }
+      data: { messages: reassembled }
     }));
     offlineMessages.delete(userId);
   }
@@ -1687,18 +1980,20 @@ function forwardReadReceipt(senderId: string, conversationId: string, readerId: 
   pendingReadReceipts.set(senderId, arr);
 }
 
-function generateJwt(payload: { userId: string, deviceId: string }): string {
+function generateJwt(payload: { userId: string, deviceId: string, deviceType?: 'mobile' | 'desktop' }): string {
   const header = btoa(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
   const body = btoa(JSON.stringify({ ...payload, exp: Math.floor(Date.now() / 1000) + 86400 }));
   const signature = btoa('signature_placeholder');
   return `${header}.${body}.${signature}`;
 }
 
-function decodeJwt(token: string): { userId: string, deviceId: string } | null {
+function decodeJwt(token: string): { userId: string, deviceId: string, deviceType?: 'mobile' | 'desktop' } | null {
   try {
     const parts = token.split('.');
     if (parts.length !== 3) return null;
-    return JSON.parse(atob(parts[1]));
+    const obj = JSON.parse(atob(parts[1]));
+    if (!obj.userId || !obj.deviceId) return null;
+    return obj;
   } catch {
     return null;
   }

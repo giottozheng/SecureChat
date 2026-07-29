@@ -6,6 +6,7 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.Log
+import android.util.Base64
 import java.io.ByteArrayOutputStream
 import com.securechat.app.data.local.ConversationDao
 import com.securechat.app.data.local.MessageDao
@@ -13,6 +14,8 @@ import com.securechat.app.data.local.ConversationEntity
 import com.securechat.app.data.local.MessageEntity
 import com.securechat.app.data.model.*
 import com.securechat.app.crypto.MessageEncryptor
+import com.securechat.app.crypto.RecipientDevice
+import com.securechat.app.crypto.V2Envelope
 import com.securechat.app.network.api.ApiService
 import com.securechat.app.util.teamDisplayName
 import com.securechat.app.util.ServerConfig
@@ -59,6 +62,76 @@ class MessageRepository @Inject constructor(
      */
     fun invalidatePeerCache() {
         remotePublicKeyCache.clear()
+    }
+
+    // ── P3：多设备（v2 信封）支持 ──
+
+    private data class DeviceInfo(val deviceId: String, val pubKey: String)
+    private data class RecipientDevicesResult(
+        val mobilePubKey: String,
+        val mobileKeyEpoch: Long,
+        val desktopDevices: List<DeviceInfo>
+    )
+
+    /**
+     * 从服务端 GET /api/users/:userId/devices 拉取收件人全部设备公钥。
+     * 返回移动端主公钥（mobilePubKey）与所有桌面端设备公钥；同时刷新对端 keyEpoch。
+     * 网络失败返回 null，调用方应回退到单移动端 v1 信封。
+     */
+    private suspend fun fetchRecipientDevices(recipientId: String, authToken: String): RecipientDevicesResult? {
+        return withContext(Dispatchers.IO) {
+            var response: okhttp3.Response? = null
+            try {
+                val request = Request.Builder()
+                    .url(ServerConfig.getUrl(context, "/api/users/$recipientId/devices"))
+                    .addHeader("Authorization", "Bearer $authToken")
+                    .get()
+                    .build()
+                response = http.newCall(request).execute()
+                if (response.isSuccessful) {
+                    val body = response.body?.string()
+                    val json = org.json.JSONObject(body ?: "{}")
+                    val mobilePubKey = json.optString("mobilePubKey", "").takeIf { it.isNotBlank() } ?: ""
+                    val mobileKeyEpoch = json.optLong("mobileKeyEpoch", 0L)
+                    if (mobilePubKey.isNotBlank()) {
+                        com.securechat.app.crypto.PeerKeyEpochStore.set(recipientId, mobileKeyEpoch)
+                    }
+                    val arr = json.optJSONArray("devices")
+                    val desktop = mutableListOf<DeviceInfo>()
+                    if (arr != null) {
+                        for (i in 0 until arr.length()) {
+                            val d = arr.optJSONObject(i) ?: continue
+                            if (d.optString("type", "") == "desktop") {
+                                val pk = d.optString("pubKey", "")
+                                val did = d.optString("deviceId", "")
+                                if (pk.isNotBlank() && did.isNotBlank()) desktop.add(DeviceInfo(did, pk))
+                            }
+                        }
+                    }
+                    RecipientDevicesResult(mobilePubKey, mobileKeyEpoch, desktop)
+                } else {
+                    Log.w(TAG, "Fetch recipient devices HTTP ${response.code} for $recipientId")
+                    null
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to fetch recipient devices", e)
+                null
+            } finally {
+                response?.close()
+            }
+        }
+    }
+
+    /**
+     * 构造 v2 收件人列表：移动端('m') + 每个桌面端(deviceId)。
+     */
+    private fun buildV2Recipients(devices: RecipientDevicesResult): List<RecipientDevice> {
+        val list = mutableListOf<RecipientDevice>()
+        if (devices.mobilePubKey.isNotBlank()) {
+            list.add(RecipientDevice("m", devices.mobilePubKey))
+        }
+        devices.desktopDevices.forEach { list.add(RecipientDevice(it.deviceId, it.pubKey)) }
+        return list
     }
 
     /**
@@ -244,20 +317,23 @@ class MessageRepository @Inject constructor(
                 val prefs = context.getSharedPreferences("securechat_prefs", Context.MODE_PRIVATE)
                 val authToken = prefs.getString("auth_token", "") ?: ""
 
-                // 1. 获取收件人的【真实】RSA 公钥（来自服务端，由收件人登录时注册）
-                //    注意：不能用本地 RsaKeystoreManager 为其他成员生成的密钥——每台设备
-                //    独立生成的 RSA 密钥互不匹配，会导致对端解密失败。
-                val recipientPublicKeyPem = getRecipientPublicKey(recipientId, authToken)
-                if (recipientPublicKeyPem.isNullOrBlank()) {
-                    Log.e(TAG, "Recipient public key not found for $recipientId (server may not have it registered)")
-                    return@withContext Result.failure(Exception("对方公钥未找到，请让对方重新打开 SecureChat 应用（以注册公钥）"))
+                // 1. 拉取收件人设备；若存在桌面端设备则走 v2 多 wrap 信封（关闭「移动→桌面」
+                //    单向不可达缺口），否则回退单移动端 v1 双信封（兼容旧版纯移动端接收方）。
+                val devices = fetchRecipientDevices(recipientId, authToken)
+                val encryptedPayload: String? = if (devices != null && devices.desktopDevices.isNotEmpty()) {
+                    val recipients = buildV2Recipients(devices)
+                    messageEncryptor.encryptMessageV2(plaintext, recipients, localUserId)?.envelope
+                } else {
+                    val recipientPublicKeyPem = getRecipientPublicKey(recipientId, authToken)
+                    if (recipientPublicKeyPem.isNullOrBlank()) {
+                        Log.e(TAG, "Recipient public key not found for $recipientId (server may not have it registered)")
+                        return@withContext Result.failure(Exception("对方公钥未找到，请让对方重新打开 SecureChat 应用（以注册公钥）"))
+                    }
+                    messageEncryptor.encryptMessage(plaintext, recipientPublicKeyPem)
                 }
-
-                // 2. 双信封加密（收件人公钥 + 自己公钥），AES-256-GCM 加密消息体
-                val encryptedPayload = messageEncryptor.encryptMessage(
-                    plaintext,
-                    recipientPublicKeyPem
-                ) ?: return@withContext Result.failure(Exception("Encryption failed"))
+                if (encryptedPayload == null) {
+                    return@withContext Result.failure(Exception("Encryption failed"))
+                }
 
                 // 3. 保存到本地数据库
                 val messageId = saveMessage(
@@ -313,33 +389,73 @@ class MessageRepository @Inject constructor(
                 val imageBytes = compressImage(uri)
                     ?: return@withContext Result.failure(Exception("图片读取或压缩失败"))
 
-                // 2. 获取收件人公钥
-                val recipientPublicKeyPem = getRecipientPublicKey(recipientId, authToken)
-                if (recipientPublicKeyPem.isNullOrBlank()) {
-                    return@withContext Result.failure(Exception("对方公钥未找到，请让对方重新打开 SecureChat 应用（以注册公钥）"))
+                // 2. 获取收件人设备，决定 v2 统一媒体还是 v1 传统信封
+                val fileName = "image_${System.currentTimeMillis()}.jpg"
+                val fileMime = "image/jpeg"
+                val devices = fetchRecipientDevices(recipientId, authToken)
+                val useV2 = devices != null && devices.desktopDevices.isNotEmpty()
+
+                val (encryptedPayload, metaFileId) = if (useV2 && devices != null) {
+                    // 统一媒体设计：消息元数据 + 图片字节共用一把会话密钥
+                    val sessionKey = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
+                    val msgIv = ByteArray(12).also { java.security.SecureRandom().nextBytes(it) }
+                    val fileIv = ByteArray(12).also { java.security.SecureRandom().nextBytes(it) }
+                    val fileCt = messageEncryptor.encryptData(sessionKey, fileIv, imageBytes)
+                        ?: return@withContext Result.failure(Exception("图片加密失败"))
+                    val fileId = uploadEncryptedFile(
+                        Base64.encodeToString(fileCt, Base64.NO_WRAP), authToken
+                    ) ?: return@withContext Result.failure(Exception("图片上传失败"))
+                    val meta = JSONObject().apply {
+                        put("kind", "image")
+                        put("fileId", fileId)
+                        put("fileIv", Base64.encodeToString(fileIv, Base64.NO_WRAP))
+                        put("name", fileName)
+                        put("mime", fileMime)
+                        put("size", imageBytes.size)
+                    }.toString()
+                    val recipients = buildV2Recipients(devices)
+                    val v2 = messageEncryptor.encryptMessageV2WithKey(
+                        meta, recipients, localUserId, sessionKey, msgIv
+                    ) ?: return@withContext Result.failure(Exception("图片元数据加密失败"))
+                    Pair(v2.envelope as String?, fileId as String?)
+                } else {
+                    val recipientPublicKeyPem = getRecipientPublicKey(recipientId, authToken)
+                    if (recipientPublicKeyPem.isNullOrBlank()) {
+                        return@withContext Result.failure(Exception("对方公钥未找到，请让对方重新打开 SecureChat 应用（以注册公钥）"))
+                    }
+                    val enc = messageEncryptor.encryptBytes(imageBytes, recipientPublicKeyPem)
+                        ?: return@withContext Result.failure(Exception("图片加密失败"))
+                    Pair(enc as String?, null as String?)
+                }
+                if (encryptedPayload == null) {
+                    return@withContext Result.failure(Exception("图片加密失败"))
                 }
 
-                // 3. 字节级信封加密
-                val encryptedPayload = messageEncryptor.encryptBytes(imageBytes, recipientPublicKeyPem)
-                    ?: return@withContext Result.failure(Exception("图片加密失败"))
-
-                // 4. 存本地
+                // 3. 存本地
                 val messageId = saveMessage(
                     conversationId = conversationId,
                     senderId = localUserId,
                     recipientId = recipientId,
                     encryptedContent = encryptedPayload,
-                    messageType = MessageType.IMAGE
+                    messageType = MessageType.IMAGE,
+                    mediaUrl = metaFileId,
+                    fileName = fileName,
+                    fileMime = fileMime,
+                    fileSize = imageBytes.size.toLong()
                 )
 
-                // 5. 发送
+                // 4. 发送
                 val code = sendMessageToServer(
                     senderId = localUserId,
                     recipientId = recipientId,
                     conversationId = conversationId,
                     encryptedContent = encryptedPayload,
                     authToken = authToken,
-                    messageType = "IMAGE"
+                    messageType = "IMAGE",
+                    fileName = fileName,
+                    fileMime = fileMime,
+                    fileSize = imageBytes.size.toLong(),
+                    fileId = metaFileId
                 )
                 if (code !in 200..299) {
                     messageDao.deleteMessage(messageId)
@@ -388,46 +504,74 @@ class MessageRepository @Inject constructor(
                     return@withContext Result.failure(Exception("文件过大（约 ${fileSize / 1024 / 1024}MB），上限 50MB"))
                 }
 
-                // 2. 获取收件人公钥
-                val recipientPublicKeyPem = getRecipientPublicKey(recipientId, authToken)
-                if (recipientPublicKeyPem.isNullOrBlank()) {
-                    return@withContext Result.failure(Exception("对方公钥未找到，请让对方重新打开 SecureChat 应用（以注册公钥）"))
+                // 2. 获取收件人设备，决定 v2 统一媒体还是 v1 传统信封
+                val devices = fetchRecipientDevices(recipientId, authToken)
+                val useV2 = devices != null && devices.desktopDevices.isNotEmpty()
+
+                val (encryptedMeta, metaFileId) = if (useV2 && devices != null) {
+                    // 统一媒体设计：文件字节与元数据共用一把会话密钥
+                    val sessionKey = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
+                    val msgIv = ByteArray(12).also { java.security.SecureRandom().nextBytes(it) }
+                    val fileIv = ByteArray(12).also { java.security.SecureRandom().nextBytes(it) }
+                    val fileCt = messageEncryptor.encryptData(sessionKey, fileIv, fileBytes)
+                        ?: return@withContext Result.failure(Exception("文件加密失败"))
+                    onProgress(0.2f)
+                    val fileId = uploadEncryptedFile(
+                        Base64.encodeToString(fileCt, Base64.NO_WRAP), authToken
+                    ) { frac -> onProgress(0.2f + 0.75f * frac) }
+                        ?: return@withContext Result.failure(Exception("文件上传失败"))
+                    val meta = JSONObject().apply {
+                        put("kind", "file")
+                        put("fileId", fileId)
+                        put("fileIv", Base64.encodeToString(fileIv, Base64.NO_WRAP))
+                        put("name", fileName)
+                        put("mime", fileMime)
+                        put("size", fileSize)
+                    }.toString()
+                    val recipients = buildV2Recipients(devices)
+                    val v2 = messageEncryptor.encryptMessageV2WithKey(
+                        meta, recipients, localUserId, sessionKey, msgIv
+                    ) ?: return@withContext Result.failure(Exception("元数据加密失败"))
+                    Pair(v2.envelope as String?, fileId as String?)
+                } else {
+                    val recipientPublicKeyPem = getRecipientPublicKey(recipientId, authToken)
+                    if (recipientPublicKeyPem.isNullOrBlank()) {
+                        return@withContext Result.failure(Exception("对方公钥未找到，请让对方重新打开 SecureChat 应用（以注册公钥）"))
+                    }
+                    val encryptedFile = messageEncryptor.encryptBytes(fileBytes, recipientPublicKeyPem)
+                        ?: return@withContext Result.failure(Exception("文件加密失败"))
+                    onProgress(0.2f)
+                    val fileId = uploadEncryptedFile(encryptedFile, authToken) { frac ->
+                        onProgress(0.2f + 0.75f * frac)
+                    } ?: return@withContext Result.failure(Exception("文件上传失败"))
+                    val meta = JSONObject().apply {
+                        put("fileId", fileId)
+                        put("name", fileName)
+                        put("mime", fileMime)
+                        put("size", fileSize)
+                    }.toString()
+                    val encMeta = messageEncryptor.encryptMessage(meta, recipientPublicKeyPem)
+                        ?: return@withContext Result.failure(Exception("元数据加密失败"))
+                    Pair(encMeta as String?, fileId as String?)
+                }
+                if (encryptedMeta == null) {
+                    return@withContext Result.failure(Exception("文件加密失败"))
                 }
 
-                // 3. 加密整个文件字节
-                val encryptedFile = messageEncryptor.encryptBytes(fileBytes, recipientPublicKeyPem)
-                    ?: return@withContext Result.failure(Exception("文件加密失败"))
-                onProgress(0.2f)
-
-                // 4. 上传加密密文，得到 fileId（上传进度 0.2 -> 0.95）
-                val fileId = uploadEncryptedFile(encryptedFile, authToken) { frac ->
-                    onProgress(0.2f + 0.75f * frac)
-                } ?: return@withContext Result.failure(Exception("文件上传失败"))
-
-                // 5. 把元数据（fileId/文件名/类型/大小）作为 JSON 信封加密，作为消息体
-                val meta = JSONObject().apply {
-                    put("fileId", fileId)
-                    put("name", fileName)
-                    put("mime", fileMime)
-                    put("size", fileSize)
-                }.toString()
-                val encryptedMeta = messageEncryptor.encryptMessage(meta, recipientPublicKeyPem)
-                    ?: return@withContext Result.failure(Exception("元数据加密失败"))
-
-                // 6. 存本地（明文存文件名/类型/大小便于列表与离线显示；mediaUrl 存 fileId）
+                // 3. 存本地（明文存文件名/类型/大小便于列表与离线显示；mediaUrl 存 fileId）
                 val messageId = saveMessage(
                     conversationId = conversationId,
                     senderId = localUserId,
                     recipientId = recipientId,
                     encryptedContent = encryptedMeta,
                     messageType = MessageType.FILE,
-                    mediaUrl = fileId,
+                    mediaUrl = metaFileId,
                     fileName = fileName,
                     fileMime = fileMime,
                     fileSize = fileSize
                 )
 
-                // 7. 发送 FILE 消息（带上文件元数据，供服务器转发）
+                // 4. 发送 FILE 消息（带上文件元数据，供服务器转发）
                 val code = sendMessageToServer(
                     senderId = localUserId,
                     recipientId = recipientId,
@@ -438,7 +582,7 @@ class MessageRepository @Inject constructor(
                     fileName = fileName,
                     fileMime = fileMime,
                     fileSize = fileSize,
-                    fileId = fileId
+                    fileId = metaFileId
                 )
                 if (code !in 200..299) {
                     messageDao.deleteMessage(messageId)

@@ -29,6 +29,34 @@ import javax.inject.Singleton
  *   - 不再维护自己的 KeyStore 实例和 RSA_KEY_ALIAS
  */
 @Singleton
+/**
+ * 收件人设备（用于 v2 多 wrap 信封）。
+ * tag：'m' = 移动端（账号主密钥），桌面端用各自 deviceId。
+ */
+data class RecipientDevice(val tag: String, val pubPem: String)
+
+/**
+ * v2 加密结果：信封字符串 + 会话密钥字节 + 消息 IV 字节。
+ * 会话密钥需回传调用方，供「统一媒体设计」加密图片/文件字节（与消息元数据共用一把密钥）。
+ */
+data class V2Envelope(val envelope: String, val sessionKey: ByteArray, val iv: ByteArray) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+        other as V2Envelope
+        return envelope == other.envelope &&
+            sessionKey.contentEquals(other.sessionKey) &&
+            iv.contentEquals(other.iv)
+    }
+
+    override fun hashCode(): Int {
+        var result = envelope.hashCode()
+        result = 31 * result + sessionKey.contentHashCode()
+        result = 31 * result + iv.contentHashCode()
+        return result
+    }
+}
+
 class MessageEncryptor @Inject constructor(
     private val rsaKeystoreManager: RsaKeystoreManager
 ) {
@@ -230,6 +258,110 @@ class MessageEncryptor @Inject constructor(
     private fun unwrapEither(wrappedR: ByteArray, wrappedS: ByteArray): SecretKey? {
         unwrapAesKey(wrappedR)?.let { return it }
         return unwrapAesKey(wrappedS)
+    }
+
+    /**
+     * AES-256-GCM 加密（指定密钥 + IV，无信封前缀）。供 v2 信封与统一媒体复用。
+     */
+    private fun aesEncryptBytes(key: ByteArray, iv: ByteArray, data: ByteArray): ByteArray {
+        val secretKey = SecretKeySpec(key, "AES")
+        val cipher = getAesGcmCipher()
+        cipher.init(Cipher.ENCRYPT_MODE, secretKey, GCMParameterSpec(AES_GCM_TAG_LENGTH, iv))
+        return cipher.doFinal(data)
+    }
+
+    /**
+     * AES-256-GCM 解密（指定密钥 + Base64 IV/密文）。供统一媒体接收侧复用（当前预留）。
+     */
+    private fun aesDecryptBytes(key: ByteArray, ivB64: String, ctB64: String): ByteArray {
+        val secretKey = SecretKeySpec(key, "AES")
+        val iv = Base64.decode(ivB64, Base64.NO_WRAP)
+        val cipher = getAesGcmCipher()
+        cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(AES_GCM_TAG_LENGTH, iv))
+        return cipher.doFinal(Base64.decode(ctB64, Base64.NO_WRAP))
+    }
+
+    // ── v2 多设备信封（P3） ──
+
+    /**
+     * v2 多 wrap 信封加密（随机会话密钥）。
+     * 为每个收件人设备生成一段 RSA 包裹，另加发送者自读包裹；服务端按目标设备抽 wrap 重组为 v1 下发。
+     * @param senderDevTag 发送者设备标识（移动端传自身 userId，桌面端传自身 deviceId），
+     *   务必与收件人 'm' 区分，避免 wrap 表 key 冲突导致服务端抽错包裹。
+     */
+    fun encryptMessageV2(
+        plaintext: String,
+        recipients: List<RecipientDevice>,
+        senderDevTag: String
+    ): V2Envelope? {
+        val keyGen = KeyGenerator.getInstance("AES")
+        keyGen.init(AES_KEY_SIZE)
+        val sessionKey = keyGen.generateKey()
+        val iv = ByteArray(AES_GCM_IV_LENGTH).also { java.security.SecureRandom().nextBytes(it) }
+        return encryptMessageV2WithKey(plaintext, recipients, senderDevTag, sessionKey.encoded, iv)
+    }
+
+    /**
+     * 用「指定会话密钥 + IV」加密 v2 信封（统一媒体设计：消息元数据与媒体字节共用一把会话密钥）。
+     */
+    fun encryptMessageV2WithKey(
+        plaintext: String,
+        recipients: List<RecipientDevice>,
+        senderDevTag: String,
+        sessionKey: ByteArray,
+        iv: ByteArray
+    ): V2Envelope? {
+        return try {
+            val ct = aesEncryptBytes(sessionKey, iv, plaintext.toByteArray(Charsets.UTF_8))
+            val parts = mutableListOf("v2", recipients.size.toString())
+            for (r in recipients) {
+                val pub = parsePublicKeyFromPem(r.pubPem)
+                val wrap = Cipher.getInstance("RSA/ECB/PKCS1Padding").apply {
+                    init(Cipher.ENCRYPT_MODE, pub)
+                }.doFinal(sessionKey)
+                parts.add(r.tag)
+                parts.add(Base64.encodeToString(wrap, Base64.NO_WRAP))
+            }
+            // 发送者自读包裹（用自身公钥）
+            val senderPub = parsePublicKeyFromPem(rsaKeystoreManager.getPublicKeyPem())
+            val wSelf = Cipher.getInstance("RSA/ECB/PKCS1Padding").apply {
+                init(Cipher.ENCRYPT_MODE, senderPub)
+            }.doFinal(sessionKey)
+            parts.add(senderDevTag)
+            parts.add(Base64.encodeToString(wSelf, Base64.NO_WRAP))
+            parts.add(Base64.encodeToString(iv, Base64.NO_WRAP))
+            parts.add(Base64.encodeToString(ct, Base64.NO_WRAP))
+            V2Envelope(parts.joinToString(":"), sessionKey, iv)
+        } catch (e: Exception) {
+            Log.e(TAG, "v2 encryption failed", e)
+            null
+        }
+    }
+
+    /**
+     * 用指定会话密钥 + IV 加密任意字节（统一媒体设计：图片/文件字节，无信封前缀）。
+     * 与 decryptData 配套，供收发双方用同一会话密钥解开消息元数据与媒体字节。
+     */
+    fun encryptData(sessionKey: ByteArray, iv: ByteArray, data: ByteArray): ByteArray? {
+        return try {
+            aesEncryptBytes(sessionKey, iv, data)
+        } catch (e: Exception) {
+            Log.e(TAG, "encryptData failed", e)
+            null
+        }
+    }
+
+    /**
+     * 用指定会话密钥 + IV(Base64) 解密原始密文（统一媒体设计：图片/文件字节）。
+     * 预留给后续接收侧解析统一媒体（桌面→移动）。当前接收侧按既有逻辑处理，未启用。
+     */
+    fun decryptData(sessionKey: ByteArray, ivB64: String, ctB64: String): ByteArray? {
+        return try {
+            aesDecryptBytes(sessionKey, ivB64, ctB64)
+        } catch (e: Exception) {
+            Log.e(TAG, "decryptData failed", e)
+            null
+        }
     }
 
     /**

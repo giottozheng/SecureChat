@@ -772,6 +772,159 @@ class MessageRepository @Inject constructor(
     }
 
     /**
+     * 历史共享（P1）：配对批准后，把本地已解密的历史用目标桌面设备公钥重加密并上传到服务端。
+     * 服务端只搬密文，桌面端拉取后用自身私钥解密即可看到完整历史。
+     *
+     * 实现：遍历本机全部会话的本地消息 → 用本机私钥解密得到明文（文本或统一媒体元数据 JSON）
+     *      → 用桌面端公钥重新做一次 v1 信封加密 → 批量 POST 到 /api/history/share。
+     * 说明：
+     *  - 文本消息：明文即消息文本，重加密后桌面可直接解密显示。
+     *  - 统一媒体（IMAGE/FILE/VOICE 且带 mediaUrl=fileId）：明文为元数据 JSON（含 fileId/fileIv），
+     *    重加密后桌面用自身私钥解出会话密钥，再下载 fileId 密文用会话密钥解密。
+     *  - 旧版 v1 媒体（二进制直接封在信封里、无 fileId）：解密为二进制经 UTF-8 字符串会损坏，
+     *    无法可靠重加密，故跳过（这类消息在桌面端将不会出现在历史中）。
+     *
+     * @return 成功上传的历史条目数（Result）
+     */
+    suspend fun shareAllHistoryWithDesktop(targetDeviceId: String): Result<Int> = withContext(Dispatchers.IO) {
+        try {
+            val prefs = context.getSharedPreferences("securechat_prefs", Context.MODE_PRIVATE)
+            val authToken = prefs.getString("auth_token", "") ?: ""
+            if (authToken.isBlank()) return@withContext Result.failure(Exception("未登录，无法共享历史"))
+
+            // 1) 拉取目标桌面设备公钥
+            val desktopPubKey = fetchDevicePublicKey(targetDeviceId, authToken)
+                ?: return@withContext Result.failure(Exception("找不到目标桌面设备公钥"))
+
+            // 2) 遍历本机全部会话与消息
+            val conversations = getConversations().first()
+            val entries = mutableListOf<org.json.JSONObject>()
+            for (conv in conversations) {
+                val participants = conv.id.split("_")
+                val peerId = participants.firstOrNull { it != localUserId } ?: localUserId
+                val messages = getConversationMessages(conv.id).first()
+                for (msg in messages) {
+                    // 旧版 v1 二进制媒体：无 fileId，跳过
+                    val isUnifiedMedia = msg.messageType != MessageType.TEXT &&
+                        msg.messageType != MessageType.SYSTEM &&
+                        msg.messageType != MessageType.CALL &&
+                        !msg.mediaUrl.isNullOrBlank()
+                    if (!isUnifiedMedia && (msg.messageType == MessageType.IMAGE ||
+                                msg.messageType == MessageType.FILE ||
+                                msg.messageType == MessageType.VOICE)
+                    ) {
+                        // 旧版 v1 媒体（无 fileId），跳过
+                        continue
+                    }
+                    val plaintext = decryptPayload(msg.encryptedContent) ?: continue
+                    val reEncrypted = messageEncryptor.encryptMessage(plaintext, desktopPubKey) ?: continue
+                    val entry = org.json.JSONObject().apply {
+                        put("id", msg.id)
+                        put("conversationId", msg.conversationId)
+                        put("peerId", peerId)
+                        put("senderId", msg.senderId)
+                        put("encryptedContent", reEncrypted)
+                        put("messageType", msg.messageType.name)
+                        put("timestamp", msg.timestamp)
+                        if (!msg.mediaUrl.isNullOrBlank()) put("fileId", msg.mediaUrl)
+                        if (!msg.fileName.isNullOrBlank()) put("fileName", msg.fileName)
+                        if (!msg.fileMime.isNullOrBlank()) put("fileMime", msg.fileMime)
+                        if (msg.fileSize > 0) put("fileSize", msg.fileSize)
+                    }
+                    entries.add(entry)
+                }
+            }
+
+            if (entries.isEmpty()) {
+                // 仍然调一次接口，确保服务端该设备历史被清空（避免拉到旧的）
+                postHistoryBatch(targetDeviceId, emptyList(), authToken)
+                return@withContext Result.success(0)
+            }
+
+            // 3) 分批上传（每批 200 条，避免单次请求体过大）
+            var uploaded = 0
+            entries.chunked(200).forEach { batch ->
+                val n = postHistoryBatch(targetDeviceId, batch, authToken)
+                if (n >= 0) uploaded += n
+            }
+            Log.i(TAG, "shareAllHistoryWithDesktop: uploaded $uploaded entries to device $targetDeviceId")
+            Result.success(uploaded)
+        } catch (e: Exception) {
+            Log.e(TAG, "shareAllHistoryWithDesktop failed", e)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * 从 GET /api/users/:userId/devices 取本账号下指定 deviceId 的桌面设备公钥。
+     */
+    private suspend fun fetchDevicePublicKey(deviceId: String, authToken: String): String? {
+        return withContext(Dispatchers.IO) {
+            var response: okhttp3.Response? = null
+            try {
+                val request = Request.Builder()
+                    .url(ServerConfig.getUrl(context, "/api/users/$localUserId/devices"))
+                    .addHeader("Authorization", "Bearer $authToken")
+                    .get()
+                    .build()
+                response = http.newCall(request).execute()
+                if (!response.isSuccessful) return@withContext null
+                val json = org.json.JSONObject(response.body?.string() ?: "{}")
+                val arr = json.optJSONArray("devices") ?: return@withContext null
+                for (i in 0 until arr.length()) {
+                    val d = arr.optJSONObject(i) ?: continue
+                    if (d.optString("type", "") == "desktop" && d.optString("deviceId", "") == deviceId) {
+                        val pk = d.optString("pubKey", "")
+                        if (pk.isNotBlank()) return@withContext pk
+                    }
+                }
+                null
+            } catch (e: Exception) {
+                Log.e(TAG, "fetchDevicePublicKey failed", e)
+                null
+            } finally {
+                response?.close()
+            }
+        }
+    }
+
+    /**
+     * 上传一批历史条目到 /api/history/share。返回该批被接受的条目数（-1 表示失败）。
+     */
+    private suspend fun postHistoryBatch(
+        deviceId: String,
+        batch: List<org.json.JSONObject>,
+        authToken: String
+    ): Int {
+        return withContext(Dispatchers.IO) {
+            var response: okhttp3.Response? = null
+            try {
+                val body = org.json.JSONObject().apply {
+                    put("deviceId", deviceId)
+                    put("entries", org.json.JSONArray(batch))
+                }
+                val req = Request.Builder()
+                    .url(ServerConfig.getUrl(context, "/api/history/share"))
+                    .addHeader("Authorization", "Bearer $authToken")
+                    .post(body.toString().toRequestBody("application/json".toMediaType()))
+                    .build()
+                response = http.newCall(req).execute()
+                if (!response.isSuccessful) {
+                    Log.w(TAG, "postHistoryBatch HTTP ${response.code}")
+                    return@withContext -1
+                }
+                val json = org.json.JSONObject(response.body?.string() ?: "{}")
+                json.optInt("accepted", batch.size)
+            } catch (e: Exception) {
+                Log.e(TAG, "postHistoryBatch failed", e)
+                -1
+            } finally {
+                response?.close()
+            }
+        }
+    }
+
+    /**
      * Fetch unread messages from server (for sync).
      */
     suspend fun fetchUnreadFromServer(authToken: String): Result<List<Message>> {

@@ -125,6 +125,36 @@ fun PairingApprovalScreen(
                 Spacer(Modifier.height(12.dp))
                 Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             }
+
+            // 历史共享（P1）进度提示
+            when {
+                state.historySharing -> {
+                    Spacer(Modifier.height(12.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Text("正在把历史消息同步到桌面端…", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                state.historySharedCount != null -> {
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        "已同步 ${state.historySharedCount} 条历史消息到桌面端",
+                        color = MaterialTheme.colorScheme.primary,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                state.historyShareError != null -> {
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        "历史同步失败：${state.historyShareError}",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
         }
     }
 }

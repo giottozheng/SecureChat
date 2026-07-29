@@ -118,6 +118,23 @@ const pairingSessions: Map<string, {
   expiresAt: number;
 }> = new Map();
 
+// 历史共享：配对后手机把本地已解密历史用桌面公钥重加密，推给目标桌面设备；桌面一次性拉取后清除。
+// 服务端只搬密文（重加密后的 v1 信封），绝不接触明文/私钥。
+interface SharedHistoryEntry {
+  id: string;
+  conversationId: string;
+  peerId: string;
+  senderId: string;
+  encryptedContent: string; // 已用目标桌面公钥重加密的 v1 信封
+  messageType: string;
+  timestamp: number;
+  fileId?: string;
+  fileName?: string;
+  fileMime?: string;
+  fileSize?: number;
+}
+const sharedHistory: Map<string, SharedHistoryEntry[]> = new Map(); // key = 目标桌面 deviceId
+
 // ── 多设备信封工具（服务端只搬密文，绝不接触明文/私钥）──
 // v2 信封格式：v2:<count>:<d1>:<w1>:...:<dn>:<wn>:<senderDev>:<wSelf>:<iv>:<ct>
 //   d* = 收件人设备标识（移动端固定用保留标识 'm'，桌面端用各自 deviceId）
@@ -412,6 +429,35 @@ function loadMessages() {
     }
   } catch (e) {
     console.error('[MSG] load failed', e);
+  }
+}
+
+// ── 历史共享持久化（落盘 shared_history.json，仅存重加密后的信封密文）──
+const SHARED_HISTORY_FILE = path.join(STATE_DIR, 'shared_history.json');
+
+function persistSharedHistoryNow() {
+  try {
+    if (!fs.existsSync(STATE_DIR)) fs.mkdirSync(STATE_DIR, { recursive: true });
+    const data = Array.from(sharedHistory.entries()).map(([deviceId, arr]) => [deviceId, arr]);
+    fs.writeFileSync(SHARED_HISTORY_FILE, JSON.stringify(data));
+  } catch (e) {
+    console.error('[SHARED] persist failed', e);
+  }
+}
+
+function loadSharedHistory() {
+  try {
+    if (fs.existsSync(SHARED_HISTORY_FILE)) {
+      const data = JSON.parse(fs.readFileSync(SHARED_HISTORY_FILE, 'utf8'));
+      if (Array.isArray(data)) {
+        data.forEach(([deviceId, arr]: [string, SharedHistoryEntry[]]) => {
+          if (Array.isArray(arr)) sharedHistory.set(deviceId, arr);
+        });
+        console.log(`[SHARED] Loaded shared history for ${sharedHistory.size} device(s) from disk`);
+      }
+    }
+  } catch (e) {
+    console.error('[SHARED] load failed', e);
   }
 }
 
@@ -1042,6 +1088,76 @@ app.get('/api/messages/history', (req: Request, res: Response) => {
   });
 
   res.json({ success: true, conversationId: convId, messages: out });
+});
+
+// ── 历史共享：手机端把重加密的历史推给目标桌面设备 ──
+// 手机端在配对批准成功后调用：把本地已解密的历史用桌面公钥重加密（v1 信封）批量上传。
+// 服务端只校验 deviceId 属于当前账号，并原样存储密文，绝不接触明文/私钥。
+
+app.post('/api/history/share', (req: Request, res: Response) => {
+  const decoded = decodeJwt((req.headers['authorization'] || '').replace(/^Bearer\s+/i, ''));
+  if (!decoded || !decoded.userId) {
+    res.status(401).json({ success: false, error: '未授权' });
+    return;
+  }
+  const body = req.body as Record<string, any>;
+  const deviceId = body?.deviceId as string | undefined;
+  const entries = body?.entries as SharedHistoryEntry[] | undefined;
+  if (!deviceId || !Array.isArray(entries)) {
+    res.status(400).json({ success: false, error: '缺少 deviceId 或 entries' });
+    return;
+  }
+  // 校验目标桌面设备确实属于当前账号
+  const user = getUserById(decoded.userId);
+  if (!user || !user.devices || !user.devices[deviceId] || user.devices[deviceId].type !== 'desktop') {
+    res.status(403).json({ success: false, error: '目标设备不属于当前账号' });
+    return;
+  }
+  // 去重（同一条历史可能因重试重复推送）：按 id 覆盖
+  const existing = sharedHistory.get(deviceId) || [];
+  const byId = new Map<string, SharedHistoryEntry>();
+  existing.forEach(e => byId.set(e.id, e));
+  let accepted = 0;
+  for (const e of entries) {
+    if (!e || typeof e.id !== 'string' || typeof e.encryptedContent !== 'string') continue;
+    byId.set(e.id, {
+      id: e.id,
+      conversationId: e.conversationId || '',
+      peerId: e.peerId || '',
+      senderId: e.senderId || '',
+      encryptedContent: e.encryptedContent,
+      messageType: e.messageType || 'TEXT',
+      timestamp: e.timestamp || Date.now(),
+      fileId: e.fileId,
+      fileName: e.fileName,
+      fileMime: e.fileMime,
+      fileSize: e.fileSize
+    });
+    accepted++;
+  }
+  sharedHistory.set(deviceId, Array.from(byId.values()));
+  persistSharedHistoryNow();
+  console.log(`[SHARED] Received ${accepted} history entries for desktop device ${deviceId} (total ${byId.size})`);
+  res.json({ success: true, accepted, total: byId.size });
+});
+
+// 桌面端一次性拉取属于自身的历史并清除（仅能拉自己的 deviceId）
+app.get('/api/history/shared', (req: Request, res: Response) => {
+  const decoded = decodeJwt((req.headers['authorization'] || '').replace(/^Bearer\s+/i, ''));
+  if (!decoded || !decoded.userId || !decoded.deviceId || decoded.deviceType !== 'desktop') {
+    res.status(401).json({ success: false, error: '仅桌面端可拉取历史' });
+    return;
+  }
+  const deviceId = (req.query.deviceId as string) || decoded.deviceId;
+  if (deviceId !== decoded.deviceId) {
+    res.status(403).json({ success: false, error: '只能拉取自身设备历史' });
+    return;
+  }
+  const entries = sharedHistory.get(deviceId) || [];
+  sharedHistory.delete(deviceId); // 一次性消费
+  persistSharedHistoryNow();
+  console.log(`[SHARED] Desktop ${deviceId} pulled ${entries.length} history entries`);
+  res.json({ success: true, entries });
 });
 
 // ── 文件（端到端加密密文）上传 / 下载 ──
@@ -1886,6 +2002,7 @@ app.delete('/admin/api/announcement/:id', requireAdmin, (req: Request, res: Resp
 loadState();
 loadConfig();
 loadMessages();
+loadSharedHistory();
 messagePersistInterval = setInterval(persistMessagesNow, 5 * 60 * 1000);
 
 // 应用配置中的监听端口（若与默认不同）

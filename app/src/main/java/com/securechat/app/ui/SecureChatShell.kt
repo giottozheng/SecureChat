@@ -35,6 +35,7 @@ import com.securechat.app.ui.screen.chat.ConversationListScreen
 import com.securechat.app.ui.screen.chat.MessageDetailScreen
 import com.securechat.app.ui.screen.contacts.ContactsScreen
 import com.securechat.app.ui.screen.settings.SettingsScreen
+import com.securechat.app.ui.screen.settings.PairingApprovalScreen
 import com.securechat.app.util.ServerConfig
 import com.securechat.app.util.canonicalConversationId
 import com.securechat.app.viewmodel.ConversationViewModel
@@ -307,12 +308,17 @@ fun NavGraphBuilder.tabContainer(
             userId = currentUserId,
             onChangeNickname = { settingsVm.updateNickname(it) },
             onChangePassword = { old, new -> settingsVm.changePassword(old, new) },
+            onNavigatePairing = { navController.navigate("pairing") },
             onClearCache = { /* TODO: clear cache */ },
             onResetKeys = { /* TODO: reset all keys */ },
             onResyncKeys = { settingsVm.reSyncKeys() },
             onLogout = onLogout,
             onAbout = { /* TODO: show about dialog */ }
         )
+    }
+
+    composable("pairing") {
+        PairingApprovalScreen(navController = navController)
     }
 }
 

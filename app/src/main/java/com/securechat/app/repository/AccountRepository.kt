@@ -23,6 +23,14 @@ import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
 
+/** 待审批的桌面端配对请求（服务端 /api/pairing/pending 返回） */
+data class PendingPairing(
+    val code: String,
+    val deviceId: String,
+    val displayName: String,
+    val expiresAt: Long
+)
+
 /**
  * 账号相关服务端调用：好友请求、昵称/密码修改、联系人名称缓存。
  * 使用原生 OkHttp（与 MessageRepository 保持一致，避免改动 Retrofit 接口）。
@@ -356,6 +364,66 @@ class AccountRepository @Inject constructor(
             Result.success(Unit)
         } catch (e: Exception) {
             Log.e(TAG, "fetchAndCacheContacts failed", e)
+            Result.failure(e)
+        }
+    }
+
+    // ── 桌面端配对审批（P3 / 多设备）──
+
+    /**
+     * 拉取当前账号视角下的待审批桌面端配对请求。
+     * 对应服务端 GET /api/pairing/pending（需 Bearer 鉴权）。
+     */
+    suspend fun getPendingPairings(): Result<List<PendingPairing>> = withContext(Dispatchers.IO) {
+        try {
+            val req = Request.Builder()
+                .url(ServerConfig.getUrl(context, "/api/pairing/pending"))
+                .addHeader("Authorization", "Bearer $authToken")
+                .get()
+                .build()
+            val resp = http.newCall(req).execute()
+            val body = resp.body?.string().orEmpty()
+            resp.close()
+            if (!resp.isSuccessful) return@withContext Result.failure(Exception("获取待审批列表失败"))
+            val arr = JSONObject(body).optJSONArray("pending") ?: JSONArray()
+            val list = mutableListOf<PendingPairing>()
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                list.add(
+                    PendingPairing(
+                        code = o.optString("code"),
+                        deviceId = o.optString("deviceId"),
+                        displayName = o.optString("displayName", "桌面端"),
+                        expiresAt = o.optLong("expiresAt", 0L)
+                    )
+                )
+            }
+            Result.success(list)
+        } catch (e: Exception) {
+            Log.e(TAG, "getPendingPairings failed", e)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * 批准某个配对码，将该桌面设备绑定到当前登录账号并签发桌面 token。
+     * 对应服务端 POST /api/pairing/approve（需 Bearer 鉴权）。
+     */
+    suspend fun approvePairing(code: String): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val json = JSONObject().apply { put("code", code) }
+            val req = Request.Builder()
+                .url(ServerConfig.getUrl(context, "/api/pairing/approve"))
+                .addHeader("Authorization", "Bearer $authToken")
+                .post(json.toString().toRequestBody("application/json".toMediaType()))
+                .build()
+            val resp = http.newCall(req).execute()
+            val body = resp.body?.string().orEmpty()
+            resp.close()
+            if (resp.isSuccessful) Result.success(Unit)
+            else Result.failure(Exception("批准失败: $body"))
+        } catch (e: Exception) {
+            Log.e(TAG, "approvePairing failed", e)
             Result.failure(e)
         }
     }

@@ -1154,9 +1154,12 @@ app.get('/api/history/shared', (req: Request, res: Response) => {
     return;
   }
   const entries = sharedHistory.get(deviceId) || [];
-  sharedHistory.delete(deviceId); // 一次性消费
-  persistSharedHistoryNow();
-  console.log(`[SHARED] Desktop ${deviceId} pulled ${entries.length} history entries`);
+  // 注意：不再「拉完即删」，改为可重复拉取（幂等）。
+  // 原因：桌面端浏览器刷新是高频操作，本地缓存可能因 /api/messages/history
+  // 返回的原版 v2 信封（不含桌面 wrap，无法解密）而被失败占位冲掉；刷新后
+  // 必须能重新拉取手机端重加密上传的历史来还原明文。共享历史始终受
+  // token + deviceId 双重鉴权约束，仅本账号本设备可拉。
+  console.log(`[SHARED] Desktop ${deviceId} pulled ${entries.length} history entries (kept on server)`);
   res.json({ success: true, entries });
 });
 

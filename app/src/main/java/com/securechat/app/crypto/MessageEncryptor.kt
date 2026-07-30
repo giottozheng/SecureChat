@@ -151,37 +151,93 @@ class MessageEncryptor @Inject constructor(
     }
 
     /**
-     * 解密消息 — 信封解密
-     * @param payload 加密 payload 字符串（v1:... 格式）
+     * 解密消息 — 信封解密（兼容 v1 双信封与 v2 多设备信封）。
+     * 本地数据库可能同时保存 v1（旧消息 / 纯移动端收发）和 v2（发送给带桌面端的多设备账号）两种格式。
+     * @param payload 加密 payload 字符串（v1:... 或 v2:... 格式）
      * @return 明文，失败返回 null
      */
     fun decryptMessage(payload: String): String? {
         return try {
-            // 双信封格式: v1:<wrapR>:<wrapS>:<iv>:<ciphertext>
-            val parts = payload.split(":", limit = 5)
-            if (parts.size != 5 || parts[0] != "v1") {
-                Log.w(TAG, "Invalid payload version or format: ${parts.size} parts")
-                return null
+            when {
+                payload.startsWith("v1:") -> decryptMessageV1(payload)
+                payload.startsWith("v2:") -> decryptMessageV2(payload)
+                else -> {
+                    Log.w(TAG, "Unknown payload version prefix")
+                    null
+                }
             }
-
-            // Step 1: 解包 AES 会话密钥（先试收件人包裹，失败再试发送者/自己包裹）
-            val wrappedR = Base64.decode(parts[1], Base64.NO_WRAP)
-            val wrappedS = Base64.decode(parts[2], Base64.NO_WRAP)
-            val sessionKey = unwrapEither(wrappedR, wrappedS) ?: return null
-
-            // Step 2: 解码 IV
-            val iv = Base64.decode(parts[3], Base64.NO_WRAP)
-
-            // Step 3: AES-GCM 解密
-            val decryptCipher = getAesGcmCipher()
-            decryptCipher.init(Cipher.DECRYPT_MODE, sessionKey, GCMParameterSpec(AES_GCM_TAG_LENGTH, iv))
-            val plaintextBytes = decryptCipher.doFinal(Base64.decode(parts[4], Base64.NO_WRAP))
-
-            String(plaintextBytes, Charsets.UTF_8)
         } catch (e: Exception) {
             Log.e(TAG, "Decryption failed", e)
             null
         }
+    }
+
+    /**
+     * 解密 v1 双信封：v1:<wrapR>:<wrapS>:<iv>:<ciphertext>
+     */
+    private fun decryptMessageV1(payload: String): String? {
+        val parts = payload.split(":", limit = 5)
+        if (parts.size != 5 || parts[0] != "v1") {
+            Log.w(TAG, "Invalid v1 payload format: ${parts.size} parts")
+            return null
+        }
+
+        // 解包 AES 会话密钥（先试收件人包裹，失败再试发送者/自己包裹）
+        val wrappedR = Base64.decode(parts[1], Base64.NO_WRAP)
+        val wrappedS = Base64.decode(parts[2], Base64.NO_WRAP)
+        val sessionKey = unwrapEither(wrappedR, wrappedS) ?: return null
+
+        val iv = Base64.decode(parts[3], Base64.NO_WRAP)
+        val decryptCipher = getAesGcmCipher()
+        decryptCipher.init(Cipher.DECRYPT_MODE, sessionKey, GCMParameterSpec(AES_GCM_TAG_LENGTH, iv))
+        val plaintextBytes = decryptCipher.doFinal(Base64.decode(parts[4], Base64.NO_WRAP))
+
+        return String(plaintextBytes, Charsets.UTF_8)
+    }
+
+    /**
+     * 解密 v2 多设备信封：v2:<count>:<tag1>:<wrap1>:...:<tagN>:<wrapN>:<senderDevTag>:<wSelf>:<iv>:<ct>
+     * 遍历所有 RSA 包裹，找到能用本机私钥解开的那份会话密钥。
+     */
+    private fun decryptMessageV2(payload: String): String? {
+        val parts = payload.split(":")
+        if (parts.size < 2 || parts[0] != "v2") {
+            Log.w(TAG, "Invalid v2 payload prefix")
+            return null
+        }
+        val count = parts[1].toIntOrNull() ?: run {
+            Log.w(TAG, "Invalid v2 recipient count")
+            return null
+        }
+        // v2: count + count*(tag+wrap) + senderDevTag + wSelf + iv + ct
+        val expectedSize = 2 + 2 * count + 4
+        if (parts.size != expectedSize) {
+            Log.w(TAG, "Invalid v2 payload format: expected $expectedSize parts, got ${parts.size}")
+            return null
+        }
+
+        val wraps = mutableListOf<ByteArray>()
+        // 收件人设备包裹
+        for (i in 0 until count) {
+            wraps.add(Base64.decode(parts[2 + 2 * i + 1], Base64.NO_WRAP))
+        }
+        // 发送者自读包裹
+        val wSelfIndex = 2 + 2 * count + 1
+        wraps.add(Base64.decode(parts[wSelfIndex], Base64.NO_WRAP))
+
+        val sessionKey = wraps.firstNotNullOfOrNull { unwrapAesKey(it) } ?: run {
+            Log.w(TAG, "No v2 wrap could be unwrapped with local private key")
+            return null
+        }
+
+        val ivIndex = wSelfIndex + 1
+        val ctIndex = wSelfIndex + 2
+        val iv = Base64.decode(parts[ivIndex], Base64.NO_WRAP)
+        val decryptCipher = getAesGcmCipher()
+        decryptCipher.init(Cipher.DECRYPT_MODE, sessionKey, GCMParameterSpec(AES_GCM_TAG_LENGTH, iv))
+        val plaintextBytes = decryptCipher.doFinal(Base64.decode(parts[ctIndex], Base64.NO_WRAP))
+
+        return String(plaintextBytes, Charsets.UTF_8)
     }
 
     /**

@@ -58,7 +58,6 @@ fun SettingsScreen(
     onResyncKeys: () -> Unit = {},
     onLogout: () -> Unit = {},
     onAbout: () -> Unit = {},
-    onNavigatePairing: () -> Unit = {},
     userId: String = ""
 ) {
     var showLogoutDialog by remember { mutableStateOf(false) }
@@ -508,20 +507,6 @@ fun SettingsScreen(
                     }
                 }
             }
-
-            Divider(modifier = Modifier.padding(vertical = 4.dp))
-
-            // ── 多设备 / 桌面端配对 ──
-            Text("多设备", style = MaterialTheme.typography.labelMedium)
-
-            ListItem(
-                headlineContent = { Text("桌面端配对审批") },
-                supportingContent = { Text("审批网页版 / 桌面 App 的登录配对请求") },
-                leadingContent = { Icon(Icons.Default.Devices, contentDescription = null) },
-                trailingContent = {
-                    TextButton(onClick = onNavigatePairing) { Text("管理") }
-                }
-            )
 
             Divider(modifier = Modifier.padding(vertical = 4.dp))
 

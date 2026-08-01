@@ -79,6 +79,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.securechat.app.util.teamDisplayName
 import com.securechat.app.util.getCachedAvatarUrl
 import com.securechat.app.util.ServerConfig
+import com.securechat.app.util.ActiveConversationTracker
 import com.securechat.app.ui.components.AvatarBox
 import com.securechat.app.data.model.Message
 import com.securechat.app.data.model.MessageType
@@ -184,6 +185,14 @@ fun MessageDetailScreen(
         initialScrollDone = false
         forceScroll = false
         stickToBottom = true
+    }
+    // 登记当前打开的会话，供推送层决定是否抑制新消息通知：
+    // 进入本聊天页时标记 conversationId，离开（dispose）时清空。
+    DisposableEffect(conversationId) {
+        ActiveConversationTracker.setOpenConversation(conversationId)
+        onDispose {
+            ActiveConversationTracker.setOpenConversation(null)
+        }
     }
     // 仅用户手指离开列表时，用最终落点判定一次跟随状态。拖拽过程中不碰 stickToBottom，
     // 避免每帧重组以及和程序化滚动抢夺该状态（1.0.40 的 wasDragged+拖拽中实时改态方案会

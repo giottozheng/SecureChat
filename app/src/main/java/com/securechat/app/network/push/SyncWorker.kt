@@ -11,6 +11,7 @@ import com.securechat.app.data.local.MessageDao
 import com.securechat.app.data.local.MessageEntity
 import com.securechat.app.util.remoteDisplayNameOverrides
 import com.securechat.app.util.teamDisplayName
+import com.securechat.app.util.ActiveConversationTracker
 import com.securechat.app.util.ServerConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -144,12 +145,16 @@ class SyncWorker(
                         }
                     }
 
-                    PushNotificationHelper.show(
-                        applicationContext,
-                        "新消息",
-                        decrypted.take(100) + if (decrypted.length > 100) "..." else "",
-                        conversationId
-                    )
+                    // 仅当 App 在前台且用户正停留在该会话详情页时，普通消息不弹通知
+                    // （语音/视频通话始终提醒，不受此影响）。
+                    if (!ActiveConversationTracker.shouldSuppressNotification(conversationId)) {
+                        PushNotificationHelper.show(
+                            applicationContext,
+                            "新消息",
+                            decrypted.take(100) + if (decrypted.length > 100) "..." else "",
+                            conversationId
+                        )
+                    }
                     newCount++
                 }
 

@@ -22,6 +22,7 @@ import com.securechat.app.data.local.MessageEntity
 import com.securechat.app.ui.activity.MainActivity
 import com.securechat.app.util.remoteDisplayNameOverrides
 import com.securechat.app.util.teamDisplayName
+import com.securechat.app.util.ActiveConversationTracker
 import com.securechat.app.util.ServerConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -466,12 +467,19 @@ class PushConnectionService : Service() {
             }
         }
 
-        PushNotificationHelper.show(
-            this,
-            "新消息",
-            decryptedContent.take(100) + if (decryptedContent.length > 100) "..." else "",
-            conversationId
-        )
+        // 是否抑制通知：仅当 App 在前台且用户正停留在该会话详情页时，普通消息不弹通知
+        // （语音/视频通话走 CallManager 独立通道，始终提醒，不受此影响）。
+        val suppress = ActiveConversationTracker.shouldSuppressNotification(conversationId)
+        if (suppress) {
+            Log.d(TAG, "通知抑制：会话 $conversationId 当前正打开，跳过新消息提醒")
+        } else {
+            PushNotificationHelper.show(
+                this,
+                "新消息",
+                decryptedContent.take(100) + if (decryptedContent.length > 100) "..." else "",
+                conversationId
+            )
+        }
     }
 
     /**

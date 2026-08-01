@@ -17,6 +17,7 @@ import androidx.compose.ui.Modifier
 import androidx.fragment.app.FragmentActivity
 import com.securechat.app.network.push.PushConnectionService
 import com.securechat.app.ui.SecureChatShell
+import com.securechat.app.util.ActiveConversationTracker
 import com.securechat.app.ui.screen.login.LoginScreen
 import com.securechat.app.ui.theme.SecureChatTheme
 import dagger.hilt.android.AndroidEntryPoint
@@ -99,6 +100,8 @@ class MainActivity : FragmentActivity() {
      */
     override fun onResume() {
         super.onResume()
+        // App 回到前台：标记，供推送层判断是否抑制「当前会话」的新消息通知
+        ActiveConversationTracker.setAppForeground(true)
         val hasValidToken = !prefs.getString("auth_token", null).isNullOrBlank()
         if (hasValidToken && !serviceStarted) {
             serviceStarted = true
@@ -117,6 +120,8 @@ class MainActivity : FragmentActivity() {
 
     override fun onPause() {
         super.onPause()
-        // 服务在后台持续运行，不需要停止
+        // App 退到后台：视为「离开聊天窗口」，清空当前会话以避免后台仍抑制通知；
+        // 服务在后台持续运行，不需要停止。
+        ActiveConversationTracker.setAppForeground(false)
     }
 }

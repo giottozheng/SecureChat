@@ -76,6 +76,9 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.securechat.app.util.teamDisplayName
+import com.securechat.app.util.getCachedAvatarUrl
+import com.securechat.app.util.ServerConfig
+import com.securechat.app.ui.components.AvatarBox
 import com.securechat.app.data.model.Message
 import com.securechat.app.data.model.MessageType
 import com.securechat.app.viewmodel.DisplayMessage
@@ -328,50 +331,41 @@ fun MessageDetailScreen(
                         IconButton(onClick = { confirmDeleteIds = uiState.selectedIds.toList() }) {
                             Icon(Icons.Default.Delete, contentDescription = "删除选中")
                         }
-                    }
+                    },
+                    windowInsets = WindowInsets.statusBars
                 )
             } else {
-                TopAppBar(
+                CenterAlignedTopAppBar(
                     title = {
-                        Text(
-                            headerTitle,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            val context = LocalContext.current
+                            val avatarUrl = recipientId?.let { uid ->
+                                getCachedAvatarUrl(uid)?.let { path ->
+                                    ServerConfig.getBaseUrl(context) + path
+                                }
+                            }
+                            AvatarBox(
+                                avatarUrl = avatarUrl,
+                                displayName = headerTitle,
+                                size = 36.dp
+                            )
+                            Text(
+                                text = headerTitle,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     },
                     navigationIcon = {
                         IconButton(onClick = onBack) {
                             Icon(Icons.Default.Chat, contentDescription = "返回")
                         }
                     },
-                    actions = {
-                        val cm = ServiceLocator.callManager
-                        if (cm != null && recipientId != null) {
-                            IconButton(onClick = {
-                                audioCallLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                            }) {
-                                Icon(
-                                    Icons.Filled.Call,
-                                    contentDescription = "语音通话",
-                                    tint = MaterialTheme.colorScheme.primary
-                                )
-                            }
-                            IconButton(onClick = {
-                                videoCallLauncher.launch(
-                                    arrayOf(
-                                        Manifest.permission.RECORD_AUDIO,
-                                        Manifest.permission.CAMERA
-                                    )
-                                )
-                            }) {
-                                Icon(
-                                    Icons.Filled.Videocam,
-                                    contentDescription = "视频通话",
-                                    tint = MaterialTheme.colorScheme.primary
-                                )
-                            }
-                        }
-                    }
+                    actions = {},
+                    windowInsets = WindowInsets.statusBars
                 )
             }
         },
@@ -650,6 +644,42 @@ fun MessageDetailScreen(
                                             filePicker.launch("*/*")
                                         }
                                     )
+                                }
+                                val cm = ServiceLocator.callManager
+                                if (cm != null && recipientId != null) {
+                                    Spacer(modifier = Modifier.height(16.dp))
+                                    Text(
+                                        text = "通话",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(bottom = 8.dp)
+                                    )
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(24.dp)
+                                    ) {
+                                        AttachmentItem(
+                                            icon = Icons.Default.Call,
+                                            label = "语音通话",
+                                            onClick = {
+                                                showAttachmentPanel = false
+                                                audioCallLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                            }
+                                        )
+                                        AttachmentItem(
+                                            icon = Icons.Default.Videocam,
+                                            label = "视频通话",
+                                            onClick = {
+                                                showAttachmentPanel = false
+                                                videoCallLauncher.launch(
+                                                    arrayOf(
+                                                        Manifest.permission.RECORD_AUDIO,
+                                                        Manifest.permission.CAMERA
+                                                    )
+                                                )
+                                            }
+                                        )
+                                    }
                                 }
                             }
                         }

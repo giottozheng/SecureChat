@@ -172,7 +172,18 @@ fun SecureChatShell(
                     MessageDetailScreen(
                         conversationId = convId,
                         recipientId = rcptId,
-                        onBack = { navController.popBackStack("root", inclusive = false) }
+                        onBack = {
+                            // 标准返回：弹掉当前 detail 回到进入详情前的 tab（chats / contacts）。
+                            // 注意：起始目的地 "root" 在启动时就已被 popUpTo(inclusive=true) 弹出栈，
+                            // 故此前 popBackStack("root",...) 永远找不到目标、静默失败导致「点返回无反应」。
+                            if (!navController.popBackStack()) {
+                                navController.navigate("chats") {
+                                    popUpTo(navController.graph.startDestinationId) { saveState = true }
+                                    launchSingleTop = true
+                                    restoreState = true
+                                }
+                            }
+                        }
                     )
                 }
             }

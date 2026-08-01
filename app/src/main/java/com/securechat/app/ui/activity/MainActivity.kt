@@ -41,6 +41,8 @@ class MainActivity : FragmentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             WindowCompat.setDecorFitsSystemWindows(window, false)
         }
+        // 浅色主题下让状态栏图标/文字变为深色，确保顶部系统状态栏可见
+        WindowCompat.getInsetsController(window, window.decorView).isAppearanceLightStatusBars = true
         // 统一使用 adjustResize：旧安卓靠它缩小窗口；新安卓靠它 + edge-to-edge 协同工作
 
         prefs = getSharedPreferences("securechat_prefs", Context.MODE_PRIVATE)

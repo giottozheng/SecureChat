@@ -54,7 +54,6 @@ class PushConnectionService : Service() {
         private const val TAG = "PushConnService"
         private const val NOTIFICATION_ID = 1001
         private const val CHANNEL_CONN_ID = "securechat_conn"
-        private const val MAX_RECONNECTION_ATTEMPTS = 20
 
         // 持有活实例，便于其他组件（如 ViewModel）经活连接发送已读回执
         @Volatile
@@ -395,6 +394,14 @@ class PushConnectionService : Service() {
                 "call_signal" -> {
                     ServiceLocator.callManager?.onSignal(text)
                 }
+                "call_missed" -> {
+                    // 服务端判定被叫离线/不可达时回此消息（call_signal 无目标连接）。
+                    // 必须处理，否则主叫会一直空振铃、没有任何「对方不在线」提示。
+                    val data = json.optJSONObject("data")
+                    val callId = data?.optString("callId", "") ?: ""
+                    Log.i(TAG, "Received call_missed (target offline): $callId")
+                    ServiceLocator.callManager?.onMissed()
+                }
                 else -> Log.w(TAG, "Unknown WS message type: $type")
             }
         } catch (e: Exception) {
@@ -512,12 +519,11 @@ class PushConnectionService : Service() {
 
     private fun scheduleReconnect(delayMs: Long = 3000) {
         reconnectJob?.cancel()
-        if (reconnectionAttempts >= MAX_RECONNECTION_ATTEMPTS) {
-            Log.e(TAG, "Max reconnection attempts reached")
-            return
-        }
+        // 常驻推送服务：无限重试，绝不因连续失败而永久放弃（否则外网/弱网设备会永久离线，
+        // 直到手动重启 App）。退避指数增长但封顶 60s，避免指数溢出与过于频繁的重连风暴。
+        val exp = minOf(reconnectionAttempts, 6)
         val actualDelay = if (delayMs == 0L) {
-            minOf(1000L * (1L shl reconnectionAttempts), 60000L)
+            minOf(1000L * (1L shl exp), 60000L)
         } else {
             delayMs
         }

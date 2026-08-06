@@ -1,9 +1,6 @@
 package com.securechat.app.call
 
 import android.Manifest
-import android.media.RingtoneManager
-import android.os.Vibrator
-import android.os.VibrationEffect
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -33,28 +30,8 @@ fun CallIncomingOverlay(state: CallState.IncomingRing) {
     val context = LocalContext.current
     val isVideo = state.type == CallType.VIDEO
 
-    // ── 来电提醒：响铃 + 震动（覆盖前台无提醒问题）──
-    DisposableEffect(Unit) {
-        val ringtone = runCatching {
-            RingtoneManager.getRingtone(
-                context,
-                RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
-            ).also {
-                it.isLooping = true
-                it.play()
-            }
-        }.getOrNull()
-        val vibrator = runCatching {
-            context.getSystemService(Vibrator::class.java)
-        }.getOrNull()
-        runCatching {
-            vibrator?.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 500, 350, 500), 0))
-        }
-        onDispose {
-            runCatching { ringtone?.stop() }
-            runCatching { vibrator?.cancel() }
-        }
-    }
+    // 注：响铃 + 重复震动由前台 CallService（MODE_RING）统一播放，
+    //     锁屏/息屏下仍持续，仿微信；此处仅负责接听界面，不再单独播铃声（避免双重响铃）。
 
     // 语音权限（RECORD_AUDIO）
     val audioLauncher = rememberLauncherForActivityResult(

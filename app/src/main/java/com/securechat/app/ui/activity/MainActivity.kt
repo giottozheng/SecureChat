@@ -15,12 +15,19 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import com.securechat.app.ServiceLocator
+import com.securechat.app.call.CallState
 import com.securechat.app.network.push.PushConnectionService
 import com.securechat.app.ui.SecureChatShell
 import com.securechat.app.util.ActiveConversationTracker
 import com.securechat.app.ui.screen.login.LoginScreen
 import com.securechat.app.ui.theme.SecureChatTheme
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
 
 /**
  * 主入口 Activity
@@ -88,6 +95,34 @@ class MainActivity : FragmentActivity() {
                     // 加载中
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator()
+                    }
+                }
+            }
+        }
+        // 通话期间把来电界面显示到锁屏之上并点亮屏幕（仿微信）
+        setupCallLockScreen()
+    }
+
+    /**
+     * 通话期间把 MainActivity 显示到锁屏之上并点亮屏幕（仿微信来电）。
+     * 订阅 CallManager.callState：来电 / 通话中 -> setShowWhenLocked + setTurnScreenOn + 保持屏幕常亮；
+     * 通话结束 -> 恢复。来电通知的 fullScreenIntent 负责把本 Activity 提到前台 / 锁屏之上。
+     */
+    private fun setupCallLockScreen() {
+        val callManager = ServiceLocator.callManager ?: return
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                callManager.callState.collect { state ->
+                    val inCall = state !is CallState.Idle && state !is CallState.Ended
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                        setShowWhenLocked(inCall)
+                        setTurnScreenOn(inCall)
+                    }
+                    @Suppress("DEPRECATION")
+                    if (inCall) {
+                        window.addFlags(WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    } else {
+                        window.clearFlags(WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                     }
                 }
             }

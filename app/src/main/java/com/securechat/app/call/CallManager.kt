@@ -1,17 +1,10 @@
 package com.securechat.app.call
 
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
 import android.content.Context
-import android.content.Intent
 import android.content.SharedPreferences
-import android.os.Build
 import android.util.Log
-import androidx.core.app.NotificationCompat
 import com.securechat.app.network.push.PushConnectionService
 import com.securechat.app.repository.MessageRepository
-import com.securechat.app.ui.activity.MainActivity
 import com.securechat.app.util.canonicalConversationId
 import com.securechat.app.util.teamDisplayName
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -52,7 +45,6 @@ class CallManager @Inject constructor(
         const val TURN_PASS = "ScTurn#9kQm2vXp"
         const val WS_TIMEOUT_MS = 30_000L
         const val TAG = "CallManager"
-        const val INCOMING_NOTIF_ID = 2003
     }
 
     private val prefs: SharedPreferences =
@@ -104,7 +96,7 @@ class CallManager @Inject constructor(
         val peerName = teamDisplayName(peerId)
         _state.value = CallState.OutgoingRing(callId, peerId, peerName, type)
         try {
-            CallService.start(appContext, type == CallType.VIDEO)
+            CallService.start(appContext, type == CallType.VIDEO, CallService.MODE_ACTIVE, peerName)
         } catch (e: Exception) {
             Log.e(TAG, "CallService.start failed", e)
         }
@@ -133,7 +125,7 @@ class CallManager @Inject constructor(
         if (s !is CallState.IncomingRing) return
         isCaller = false
         _state.value = CallState.Connected(s.callId, s.peerId, s.peerName, s.type, isCaller = false)
-        CallService.start(appContext, s.type == CallType.VIDEO)
+        CallService.start(appContext, s.type == CallType.VIDEO, CallService.MODE_ACTIVE, s.peerName)
         sendSignal(CallActions.ACCEPT)
         Log.i(TAG, "acceptCall callId=${s.callId}")
         // 等待主叫发来 offer 后 setRemote + createAnswer
@@ -255,11 +247,10 @@ class CallManager @Inject constructor(
         val peerName = teamDisplayName(from)
         _state.value = CallState.IncomingRing(callId, from, peerName, callType)
         try {
-            CallService.start(appContext, callType == CallType.VIDEO)
+            CallService.start(appContext, callType == CallType.VIDEO, CallService.MODE_RING, peerName)
         } catch (e: Exception) {
             Log.e(TAG, "CallService.start failed", e)
         }
-        showIncomingCallNotification(peerName, callType)
         initWebRtcAsync(callType == CallType.VIDEO)
         Log.i(TAG, "IncomingRing from $from ($callType) callId=$callId")
         // 30s 未接 -> 拒接
@@ -349,56 +340,8 @@ class CallManager @Inject constructor(
 
     // ───────────────────────────── 收尾 ─────────────────────────────
 
-    /**
-     * 来电提醒：弹 heads-up 通知（高优先级 + 声音 + 震动），即使 App 在后台也能提醒。
-     * 点按打开 App（MainActivity 会显示 CallIncomingOverlay 接听界面）。
-     */
-    private fun showIncomingCallNotification(peerName: String, callType: CallType) {
-        runCatching {
-            val nm = appContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            val channelId = "securechat_incoming_call"
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val ch = NotificationChannel(channelId, "来电提醒", NotificationManager.IMPORTANCE_HIGH).apply {
-                    description = "来电响铃与震动提醒"
-                    setShowBadge(true)
-                    enableLights(true)
-                    enableVibration(true)
-                    vibrationPattern = longArrayOf(0, 400, 250, 400)
-                }
-                nm.createNotificationChannel(ch)
-            }
-            val pi = PendingIntent.getActivity(
-                appContext, INCOMING_NOTIF_ID,
-                Intent(appContext, MainActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                },
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-            val notif = NotificationCompat.Builder(appContext, channelId)
-                .setContentTitle("来电：$peerName")
-                .setContentText(if (callType == CallType.VIDEO) "视频通话邀请" else "语音通话邀请")
-                .setSmallIcon(android.R.drawable.ic_menu_call)
-                .setContentIntent(pi)
-                .setPriority(NotificationCompat.PRIORITY_MAX)
-                .setCategory(NotificationCompat.CATEGORY_CALL)
-                .setDefaults(NotificationCompat.DEFAULT_SOUND or NotificationCompat.DEFAULT_VIBRATE)
-                .setAutoCancel(false)
-                .setOngoing(true)
-                .build()
-            nm.notify(INCOMING_NOTIF_ID, notif)
-        }
-    }
-
-    private fun cancelIncomingCallNotification() {
-        runCatching {
-            (appContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
-                .cancel(INCOMING_NOTIF_ID)
-        }
-    }
-
     private fun endCall(reason: String, durationSec: Long) {
-        // 来电通知可能仍存在（接听/拒接/超时/对方取消），先取消
-        cancelIncomingCallNotification()
+        // CallService 前台通知（含来电响铃）由 CallService.stop 统一停止
         val s = _state.value
         val callId: String
         val peerId: String

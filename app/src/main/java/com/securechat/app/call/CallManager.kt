@@ -42,7 +42,7 @@ class CallManager @Inject constructor(
     // TURN 静态长期凭据（内网小团队可接受；后续可升级为服务端动态下发）
     private companion object {
         const val TURN_USER = "securechat"
-        const val TURN_PASS = "ScTurn#9kQm2vXp"
+        const val TURN_PASS = "JtNhae88eaW1L3LllUU5bPZ4"
         const val WS_TIMEOUT_MS = 30_000L
         const val TAG = "CallManager"
     }

@@ -1,0 +1,15 @@
+[Unit]
+Description=SecureChat Push Server
+After=network.target
+
+[Service]
+Type=simple
+User=hackdz
+WorkingDirectory=/home/hackdz/securechat-build/SecureChat/server
+ExecStart=/usr/bin/node dist/server.js
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target

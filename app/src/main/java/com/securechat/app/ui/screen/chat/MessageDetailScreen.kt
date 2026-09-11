@@ -546,7 +546,7 @@ fun MessageDetailScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                            verticalAlignment = Alignment.Bottom
                         ) {
                             OutlinedTextField(
                                 value = messageText,
@@ -555,8 +555,9 @@ fun MessageDetailScreen(
                                     .weight(1f)
                                     .padding(horizontal = 4.dp),
                                 placeholder = { Text("输入加密消息...") },
-                                singleLine = true,
-                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                                minLines = 1,
+                                maxLines = 4,
+                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
                                 keyboardActions = KeyboardActions(
                                     onSend = {
                                         if (messageText.isNotBlank() || quotedMessage != null) {

@@ -192,29 +192,59 @@ fun MessageDetailScreen(
             ActiveConversationTracker.setOpenConversation(null)
         }
     }
-    // 判定跟随状态：等滚动「完全安定」（isScrollInProgress 由 true 回落 false，覆盖
-    // 手指拖拽 + 抬手后惯性 fling + 程序化滚动全程）后，用最终落点判定一次。
-    // 旧方案（DragInteraction.Stop 抬手瞬间判定）有两个方向的误判：
-    // ①在底部快速上划：抬手时还在底部附近 → 误判贴底 → 浏览历史时被新消息拽回最新；
-    // ②从中部快速下划回底：抬手时未到底 → 误判离底 → 惯性停稳后没人纠正，新消息不跟随。
+    // 跟随状态判定（双规则，微信式）：
+    // A. 用户滚动进行中：一旦离底立即 stick=false（看历史意图明确，不等安定）。
+    //    程序化 scrollToItem 也会置 isScrollInProgress=true，但其落点是列表底部，
+    //    isAtBottom=true 不满足离底条件，不会误伤自动跟随。
+    //    （1.0.90 回归修复：当时只有「安定后判定」单规则，拖拽进行中 stick 仍 true，
+    //     重锚定兜底 effect 会把用户每帧拽回底部，导致根本划不出历史区。）
+    // B. 滚动安定后：仅做「恢复」方向判定——落点贴底才恢复跟随（修症状二：
+    //    从历史快速下划回底后新消息不跟随）；落点非底不动 stick（A 已实时清）。
     LaunchedEffect(listState) {
         var wasScrolling = false
         snapshotFlow { listState.isScrollInProgress }
             .collect { scrolling ->
                 if (scrolling) {
                     wasScrolling = true
+                    if (stickToBottom && !isAtBottom) {
+                        stickToBottom = false
+                        if (BuildConfig.ENABLE_LOGGING)
+                            Log.d("SecureChatScroll", "scrolling away from bottom -> stickToBottom=false")
+                    }
                 } else if (wasScrolling) {
                     wasScrolling = false
                     val info = listState.layoutInfo
                     val last = info.visibleItemsInfo.lastOrNull() ?: return@collect
                     val atBottomNow = (last.offset + last.size) <= info.viewportEndOffset + 50
-                    if (stickToBottom != atBottomNow) {
-                        stickToBottom = atBottomNow
+                    if (atBottomNow && !stickToBottom) {
+                        stickToBottom = true
                         if (BuildConfig.ENABLE_LOGGING)
-                            Log.d("SecureChatScroll", "scroll settled -> stickToBottom=$stickToBottom (atBottomNow=$atBottomNow)")
+                            Log.d("SecureChatScroll", "settled at bottom -> stickToBottom=true")
                     }
                 }
             }
+    }
+    // 新消息胶囊计数（微信式）：看历史(!stick)时列表增长 → 累加未读数，不滚动；
+    // 跟随中(stick=true)用户正看着底部 → 清零。切会话时重置。
+    var pendingNewCount by remember { mutableStateOf(0) }
+    var lastSeenSize by remember { mutableStateOf(0) }
+    LaunchedEffect(uiState.displayItems.size) {
+        val size = uiState.displayItems.size
+        val prev = lastSeenSize
+        lastSeenSize = size
+        if (size > prev && prev > 0) {           // 有新消息到达（排除首屏加载 prev=0）
+            if (stickToBottom) {
+                pendingNewCount = 0               // 在底部看着 → 不需要提示
+            } else {
+                pendingNewCount += size - prev     // 在看历史 → 累加，绝不滚动
+                if (BuildConfig.ENABLE_LOGGING)
+                    Log.d("SecureChatScroll", "new message while browsing history: pending=$pendingNewCount")
+            }
+        }
+    }
+    LaunchedEffect(conversationId) {
+        pendingNewCount = 0
+        lastSeenSize = 0
     }
     // 首屏 / 收到新消息 / 发消息 → 跟随态则滚到底部
     // 历史会话（长列表）首屏一次性布局时 scrollToItem 常一次不到位（中间项未测量、
@@ -445,6 +475,44 @@ fun MessageDetailScreen(
                                     )
                                 }
                             }
+                        }
+                    }
+                }
+
+                // 微信式「N 条新消息」胶囊：看历史时来新消息不滚屏，点此跳最新
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = !stickToBottom && pendingNewCount > 0,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 16.dp)
+                ) {
+                    Surface(
+                        onClick = {
+                            pendingNewCount = 0
+                            stickToBottom = true
+                            forceScroll = true
+                        },
+                        shape = RoundedCornerShape(50),
+                        color = MaterialTheme.colorScheme.primary,
+                        shadowElevation = 4.dp,
+                        modifier = Modifier
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.ArrowDownward,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onPrimary,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                text = if (pendingNewCount == 1) "1 条新消息" else "$pendingNewCount 条新消息",
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                style = MaterialTheme.typography.labelMedium
+                            )
                         }
                     }
                 }

@@ -21,7 +21,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.rememberTransformableState
@@ -168,10 +167,9 @@ fun MessageDetailScreen(
     // 发送消息时强制滚到底部（不依赖 canScrollForward，避免新消息追加后该判断失效导致不滚）
     var forceScroll by remember { mutableStateOf(false) }
     // 是否跟随到底部：发消息/在底部时为真；手动上滑看历史时为假。
-    // 唯一会改变它的来源：用户手指「离开」列表（DragInteraction.Stop/Cancel）那一刻，
-    // 按当前是否贴底判定一次。程序化 scrollToItem 不触发 DragInteraction，
-    // 因此永远不参与 stickToBottom 的判定 → 彻底消除「自动滚动 vs 跟随状态」的竞态。
-    // （推论：只要用户不主动上滑，stickToBottom 恒为真，收到任何消息必然自动滚到底。）
+    // 唯一会改变它的来源：滚动完全安定（拖拽+惯性 fling 全结束）后的最终落点。
+    // 程序化 scrollToItem 滚到的是列表末尾，settle 后判定自然贴底 → 不影响跟随状态。
+    // （推论：只要用户不主动上滑离开底部，stickToBottom 恒为真，收到任何消息必然自动滚到底。）
     var stickToBottom by remember { mutableStateOf(true) }
     val isAtBottom by remember {
         derivedStateOf {
@@ -194,22 +192,29 @@ fun MessageDetailScreen(
             ActiveConversationTracker.setOpenConversation(null)
         }
     }
-    // 仅用户手指离开列表时，用最终落点判定一次跟随状态。拖拽过程中不碰 stickToBottom，
-    // 避免每帧重组以及和程序化滚动抢夺该状态（1.0.40 的 wasDragged+拖拽中实时改态方案会
-    // 因时序竞态把状态弄歪，导致「安装后就不自动滚」）。
+    // 判定跟随状态：等滚动「完全安定」（isScrollInProgress 由 true 回落 false，覆盖
+    // 手指拖拽 + 抬手后惯性 fling + 程序化滚动全程）后，用最终落点判定一次。
+    // 旧方案（DragInteraction.Stop 抬手瞬间判定）有两个方向的误判：
+    // ①在底部快速上划：抬手时还在底部附近 → 误判贴底 → 浏览历史时被新消息拽回最新；
+    // ②从中部快速下划回底：抬手时未到底 → 误判离底 → 惯性停稳后没人纠正，新消息不跟随。
     LaunchedEffect(listState) {
-        listState.interactionSource.interactions.collect { interaction ->
-            if (interaction is DragInteraction.Stop || interaction is DragInteraction.Cancel) {
-                val info = listState.layoutInfo
-                val last = info.visibleItemsInfo.lastOrNull() ?: return@collect
-                val atBottomNow = (last.offset + last.size) <= info.viewportEndOffset + 50
-                if (stickToBottom != atBottomNow) {
-                    stickToBottom = atBottomNow
-                    if (BuildConfig.ENABLE_LOGGING)
-                        Log.d("SecureChatScroll", "drag-stop -> stickToBottom=$stickToBottom (atBottomNow=$atBottomNow)")
+        var wasScrolling = false
+        snapshotFlow { listState.isScrollInProgress }
+            .collect { scrolling ->
+                if (scrolling) {
+                    wasScrolling = true
+                } else if (wasScrolling) {
+                    wasScrolling = false
+                    val info = listState.layoutInfo
+                    val last = info.visibleItemsInfo.lastOrNull() ?: return@collect
+                    val atBottomNow = (last.offset + last.size) <= info.viewportEndOffset + 50
+                    if (stickToBottom != atBottomNow) {
+                        stickToBottom = atBottomNow
+                        if (BuildConfig.ENABLE_LOGGING)
+                            Log.d("SecureChatScroll", "scroll settled -> stickToBottom=$stickToBottom (atBottomNow=$atBottomNow)")
+                    }
                 }
             }
-        }
     }
     // 首屏 / 收到新消息 / 发消息 → 跟随态则滚到底部
     // 历史会话（长列表）首屏一次性布局时 scrollToItem 常一次不到位（中间项未测量、

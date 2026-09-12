@@ -13,8 +13,8 @@ android {
         applicationId = "com.securechat.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 93
-        versionName = "1.0.92"
+        versionCode = 94
+        versionName = "1.0.93"
 
         buildConfigField("String", "API_BASE_URL", "\"http://192.168.10.99:8080\"")
         buildConfigField("Boolean", "ENABLE_LOGGING", "true")

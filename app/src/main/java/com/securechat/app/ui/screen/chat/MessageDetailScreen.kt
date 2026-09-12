@@ -21,6 +21,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.rememberTransformableState
@@ -192,37 +193,49 @@ fun MessageDetailScreen(
             ActiveConversationTracker.setOpenConversation(null)
         }
     }
-    // 跟随状态判定（双规则，微信式）：
-    // A. 用户滚动进行中：一旦离底立即 stick=false（看历史意图明确，不等安定）。
-    //    程序化 scrollToItem 也会置 isScrollInProgress=true，但其落点是列表底部，
-    //    isAtBottom=true 不满足离底条件，不会误伤自动跟随。
-    //    （1.0.90 回归修复：当时只有「安定后判定」单规则，拖拽进行中 stick 仍 true，
-    //     重锚定兜底 effect 会把用户每帧拽回底部，导致根本划不出历史区。）
-    // B. 滚动安定后：仅做「恢复」方向判定——落点贴底才恢复跟随（修症状二：
-    //    从历史快速下划回底后新消息不跟随）；落点非底不动 stick（A 已实时清）。
+    // 跟随状态判定（最终方案 v3：DragInteraction 区分手势 + 轮询 + settle 双向）
+    // 四版迭代教训总结：
+    // v1(1.0.90) settle 单判定 → 拖拽中 stick=true，重锚定每帧拽回
+    // v2(1.0.91) +拖拽中实时解除(isScrollInProgress发射时) → 发射在滚动开始一瞬，
+    //   快甩时还在底部容差内，解除从未发生
+    // v2.5(1.0.92) +程序滚动让位门禁 → 拦住了滚动中拽回，但 fling settle 后、
+    //   轮询解除前的 16ms 窗口内重锚定仍可拽回；且纯轮询会误伤胶囊跳底(程序滚动中)
+    // v3 本版：解除仅认 DragInteraction（手指拖拽）——程序化滚动绝不解除跟随；
+    //   settle 后双向判定兜住快甩（fling 结束按最终落点解除/恢复）。
+    var userDragging by remember { mutableStateOf(false) }
     LaunchedEffect(listState) {
-        var wasScrolling = false
-        snapshotFlow { listState.isScrollInProgress }
-            .collect { scrolling ->
-                if (scrolling) {
-                    wasScrolling = true
-                    if (stickToBottom && !isAtBottom) {
-                        stickToBottom = false
-                        if (BuildConfig.ENABLE_LOGGING)
-                            Log.d("SecureChatScroll", "scrolling away from bottom -> stickToBottom=false")
-                    }
-                } else if (wasScrolling) {
-                    wasScrolling = false
-                    val info = listState.layoutInfo
-                    val last = info.visibleItemsInfo.lastOrNull() ?: return@collect
+        listState.interactionSource.interactions.collect { i ->
+            when (i) {
+                is DragInteraction.Start -> userDragging = true
+                is DragInteraction.Stop, is DragInteraction.Cancel -> userDragging = false
+            }
+        }
+    }
+    LaunchedEffect(listState) {
+        while (true) {
+            if (userDragging) {
+                // 手指在列表上：离底立即解除（每帧轮询，快甩接触期也覆盖）
+                if (stickToBottom && !isAtBottom) {
+                    stickToBottom = false
+                    if (BuildConfig.ENABLE_LOGGING)
+                        Log.d("SecureChatScroll", "drag away -> stickToBottom=false")
+                }
+            } else if (!listState.isScrollInProgress) {
+                // 无手势且滚动已停（含 fling 结束）：按最终落点双向判定。
+                // 快甩场景：接触期未出容差、fling 飞出 → 此处解除。
+                val info = listState.layoutInfo
+                val last = info.visibleItemsInfo.lastOrNull()
+                if (last != null) {
                     val atBottomNow = (last.offset + last.size) <= info.viewportEndOffset + 50
-                    if (atBottomNow && !stickToBottom) {
-                        stickToBottom = true
+                    if (stickToBottom != atBottomNow) {
+                        stickToBottom = atBottomNow
                         if (BuildConfig.ENABLE_LOGGING)
-                            Log.d("SecureChatScroll", "settled at bottom -> stickToBottom=true")
+                            Log.d("SecureChatScroll", "settled -> stickToBottom=$stickToBottom")
                     }
                 }
             }
+            kotlinx.coroutines.delay(16)
+        }
     }
     // 新消息胶囊计数（微信式）：看历史(!stick)时列表增长 → 累加未读数，不滚动；
     // 跟随中(stick=true)用户正看着底部 → 清零。切会话时重置。
@@ -285,13 +298,16 @@ fun MessageDetailScreen(
     }
     // 懒解密导致底部气泡高度变化（占位单行→真实多行）后重新锚定到底部，
     // 否则最后 1~2 条会被顶出视口。仅在「确实偏离底部」时滚，避免抖动。
-    // 门禁：用户滚动中让位（这是 1.0.90/1.0.91 两次「拉回」回归的共同元凶：
-    // 用户刚划出底部 50px 的那一帧，本 effect 与规则 A 同时触发，它直接 scrollToItem
-    // 取消手势把列表拽回底部 → 用户永远划不出历史区）。
+    // 门禁1：用户滚动中让位（1.0.90/1.0.91 两次「拉回」回归的元凶）。
+    // 门禁2：64ms 延迟复查——快甩 fling settle 后，stick 判定（16ms 轮询）与
+    //   本 effect 存在帧级竞态；延迟 64ms 后若 stick 已被判定清掉，则不滚。
     LaunchedEffect(listState.layoutInfo) {
         if (stickToBottom && !isAtBottom && uiState.displayItems.isNotEmpty()
             && !listState.isScrollInProgress) {
-            listState.scrollToItem(uiState.displayItems.lastIndex)
+            kotlinx.coroutines.delay(64)
+            if (stickToBottom && !isAtBottom && !listState.isScrollInProgress) {
+                listState.scrollToItem(uiState.displayItems.lastIndex)
+            }
         }
     }
 

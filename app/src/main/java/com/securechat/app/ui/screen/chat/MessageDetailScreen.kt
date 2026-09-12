@@ -250,11 +250,14 @@ fun MessageDetailScreen(
     // 历史会话（长列表）首屏一次性布局时 scrollToItem 常一次不到位（中间项未测量、
     // 懒解密占位→真实高度变化导致估算偏移），故重试若干次直到真正贴底，
     // 根治「旧会话打开后停在中间、需手动上划」的问题。
+    // 门禁：用户正在拖拽/惯性滚动时绝不抢滚动（1.0.91 之前该 effect 在用户拖拽中
+    // 每帧触发 scrollToItem，取消手势把用户拽回底部 → 「一拉就被拉回来」的直接元凶）。
     LaunchedEffect(uiState.displayItems.size, forceScroll) {
         if (uiState.displayItems.isEmpty()) return@LaunchedEffect
         if (!initialScrollDone || forceScroll || stickToBottom) {
             var tries = 0
             while (tries < 6) {
+                if (listState.isScrollInProgress) break   // 用户在滚 → 立即让位
                 listState.scrollToItem(uiState.displayItems.lastIndex)
                 delay(24)
                 val info = listState.layoutInfo
@@ -272,8 +275,9 @@ fun MessageDetailScreen(
     }
     // 键盘弹起/收起改变视口高度时，若处于跟随态则重新锚定到底部
     // （用 kbPadDp 作 key，避免与下方 layoutInfo 兜底形成布局竞态）
+    // 门禁：用户滚动中让位。
     LaunchedEffect(kbPadDp) {
-        if (stickToBottom && uiState.displayItems.isNotEmpty()) {
+        if (stickToBottom && uiState.displayItems.isNotEmpty() && !listState.isScrollInProgress) {
             if (BuildConfig.ENABLE_LOGGING)
                 Log.d("SecureChatScroll", "re-anchor on keyboard change, stick=$stickToBottom")
             listState.scrollToItem(uiState.displayItems.lastIndex)
@@ -281,8 +285,12 @@ fun MessageDetailScreen(
     }
     // 懒解密导致底部气泡高度变化（占位单行→真实多行）后重新锚定到底部，
     // 否则最后 1~2 条会被顶出视口。仅在「确实偏离底部」时滚，避免抖动。
+    // 门禁：用户滚动中让位（这是 1.0.90/1.0.91 两次「拉回」回归的共同元凶：
+    // 用户刚划出底部 50px 的那一帧，本 effect 与规则 A 同时触发，它直接 scrollToItem
+    // 取消手势把列表拽回底部 → 用户永远划不出历史区）。
     LaunchedEffect(listState.layoutInfo) {
-        if (stickToBottom && !isAtBottom && uiState.displayItems.isNotEmpty()) {
+        if (stickToBottom && !isAtBottom && uiState.displayItems.isNotEmpty()
+            && !listState.isScrollInProgress) {
             listState.scrollToItem(uiState.displayItems.lastIndex)
         }
     }

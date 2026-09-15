@@ -186,11 +186,23 @@ fun MessageDetailScreen(
         stickToBottom = true
     }
     // 登记当前打开的会话，供推送层决定是否抑制新消息通知：
-    // 进入本聊天页时标记 conversationId，离开（dispose）时清空。
+    //  - 进入本聊天页即登记；每当宿主 Activity 回到 ON_RESUME 再补登记一次
+    //    （从后台切回、或别的界面覆盖后返回，Compose 组合并未重建、DisposableEffect 不会重跑，
+    //     靠这次补登记保证「人还在本会话里」的判定不丢）；
+    //  - 真正离开时用 clearConversationIfCurrent：只有当前登记的仍是本会话才清空，
+    //    避免会话间跳转时旧页面的 dispose 晚于新页面登记、把新会话登记误清空。
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     DisposableEffect(conversationId) {
         ActiveConversationTracker.setOpenConversation(conversationId)
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                ActiveConversationTracker.setOpenConversation(conversationId)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
-            ActiveConversationTracker.setOpenConversation(null)
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            ActiveConversationTracker.clearConversationIfCurrent(conversationId)
         }
     }
     // 跟随状态判定（v4：settle 判定恢复事件驱动，修键盘弹起误清跟随）

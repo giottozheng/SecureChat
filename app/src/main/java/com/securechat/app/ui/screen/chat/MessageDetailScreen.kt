@@ -193,36 +193,44 @@ fun MessageDetailScreen(
             ActiveConversationTracker.setOpenConversation(null)
         }
     }
-    // 跟随状态判定（最终方案 v3：DragInteraction 区分手势 + 轮询 + settle 双向）
-    // 四版迭代教训总结：
-    // v1(1.0.90) settle 单判定 → 拖拽中 stick=true，重锚定每帧拽回
-    // v2(1.0.91) +拖拽中实时解除(isScrollInProgress发射时) → 发射在滚动开始一瞬，
-    //   快甩时还在底部容差内，解除从未发生
-    // v2.5(1.0.92) +程序滚动让位门禁 → 拦住了滚动中拽回，但 fling settle 后、
-    //   轮询解除前的 16ms 窗口内重锚定仍可拽回；且纯轮询会误伤胶囊跳底(程序滚动中)
-    // v3 本版：解除仅认 DragInteraction（手指拖拽）——程序化滚动绝不解除跟随；
-    //   settle 后双向判定兜住快甩（fling 结束按最终落点解除/恢复）。
+    // 跟随状态判定（v4：settle 判定恢复事件驱动，修键盘弹起误清跟随）
+    // v3 回归：settle 双向判定被写成了每16ms常驻轮询——键盘弹起瞬间视口骤矮、
+    //   最后一条被挤出视野（无滚动序列、无手势），常驻判定误判「在看历史」→ stick
+    //   被清 → 键盘锚定不滚 → 最新消息被键盘挡住，需手动划/点箭头。
+    // v4：settle 判定仅在「真实滚动序列结束」（isScrollInProgress 出现 true→false
+    //   完整边沿）且该序列由手指手势发起（DragInteraction.Start 置 armed）时执行
+    //   一次。键盘弹起/懒解密变高/新消息插入等无滚动序列的离底不触发判定 →
+    //   跟随态保持，键盘锚定照常滚到底。
     var userDragging by remember { mutableStateOf(false) }
+    var userScrollArmed by remember { mutableStateOf(false) }
     LaunchedEffect(listState) {
         listState.interactionSource.interactions.collect { i ->
             when (i) {
-                is DragInteraction.Start -> userDragging = true
+                is DragInteraction.Start -> {
+                    userDragging = true
+                    userScrollArmed = true     // 手势发起的滚动序列 → 结束时需判定
+                }
                 is DragInteraction.Stop, is DragInteraction.Cancel -> userDragging = false
             }
         }
     }
     LaunchedEffect(listState) {
+        var wasScrolling = false
         while (true) {
-            if (userDragging) {
-                // 手指在列表上：离底立即解除（每帧轮询，快甩接触期也覆盖）
-                if (stickToBottom && !isAtBottom) {
-                    stickToBottom = false
-                    if (BuildConfig.ENABLE_LOGGING)
-                        Log.d("SecureChatScroll", "drag away -> stickToBottom=false")
-                }
-            } else if (!listState.isScrollInProgress) {
-                // 无手势且滚动已停（含 fling 结束）：按最终落点双向判定。
-                // 快甩场景：接触期未出容差、fling 飞出 → 此处解除。
+            val scrolling = listState.isScrollInProgress
+            if (scrolling) {
+                wasScrolling = true
+            }
+            if (userDragging && stickToBottom && !isAtBottom) {
+                // 手指拖拽中：离底立即解除（快甩接触期覆盖）
+                stickToBottom = false
+                if (BuildConfig.ENABLE_LOGGING)
+                    Log.d("SecureChatScroll", "drag away -> stickToBottom=false")
+            } else if (!scrolling && wasScrolling && userScrollArmed) {
+                // 手势发起的滚动序列刚结束（fling 停稳）：按最终落点双向判定一次。
+                // 快甩：接触期未出容差、fling 飞出 → 此处解除。
+                wasScrolling = false
+                userScrollArmed = false
                 val info = listState.layoutInfo
                 val last = info.visibleItemsInfo.lastOrNull()
                 if (last != null) {
@@ -230,7 +238,7 @@ fun MessageDetailScreen(
                     if (stickToBottom != atBottomNow) {
                         stickToBottom = atBottomNow
                         if (BuildConfig.ENABLE_LOGGING)
-                            Log.d("SecureChatScroll", "settled -> stickToBottom=$stickToBottom")
+                            Log.d("SecureChatScroll", "gesture settled -> stickToBottom=$stickToBottom")
                     }
                 }
             }
